@@ -9,7 +9,7 @@ hop-client
 httpx
 confluent_kafka
 lasair
-lsdb==0.8.1
+lsdb==0.9.0
 pittgoogle-client
 numpy==2.4.2
 pandas==2.3.3
