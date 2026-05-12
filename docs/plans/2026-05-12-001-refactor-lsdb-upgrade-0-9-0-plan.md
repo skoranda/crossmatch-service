@@ -1,7 +1,7 @@
 ---
 title: "refactor: Upgrade LSDB to v0.9.0"
 type: refactor
-status: active
+status: completed
 date: 2026-05-12
 origin: docs/brainstorms/2026-05-12-upgrade-lsdb-to-0-9-0-requirements.md
 ---
