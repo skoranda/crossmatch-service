@@ -4,6 +4,7 @@ from celery import shared_task
 from django.conf import settings
 from core.models import Alert, CatalogMatch, Notification
 from matching.catalog import crossmatch_alerts
+from matching.payload import build_catalog_payload
 from core.log import get_logger
 logger = get_logger(__name__)
 
@@ -58,6 +59,7 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
             source_id_col = catalog_config['source_id_column']
             ra_col = catalog_config['ra_column']
             dec_col = catalog_config['dec_column']
+            payload_cols = catalog_config.get('payload_columns', [])
 
             try:
                 result_df = crossmatch_alerts(alerts_catalog, catalog_config)
@@ -81,37 +83,59 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
             # (namedtuple fields cannot start with underscore)
             result_df = result_df.rename(columns={'_dist_arcsec': 'dist_arcsec'})
 
-            # 3. Build CatalogMatch and Notification rows in single pass
+            # 3. Build CatalogMatch and Notification rows in a single pass.
+            # Each row is built defensively: an unexpected value in one row logs
+            # and skips that row without dropping the rest of the catalog's
+            # matches or aborting the batch (R8). Both records are appended only
+            # after both are built, so the two lists stay aligned.
             matches_to_create = []
             notifications_to_create = []
             for row in result_df.itertuples(index=False):
-                dia_id = row.lsst_diaObject_diaObjectId
-                src_id = str(getattr(row, source_id_col))
-                dist = row.dist_arcsec
-                ra = getattr(row, ra_col)
-                dec = getattr(row, dec_col)
+                try:
+                    dia_id = row.lsst_diaObject_diaObjectId
+                    src_id = str(getattr(row, source_id_col))
+                    dist = row.dist_arcsec
+                    ra = getattr(row, ra_col)
+                    dec = getattr(row, dec_col)
 
-                matches_to_create.append(CatalogMatch(
-                    alert_id=dia_id,
-                    catalog_name=catalog_name,
-                    catalog_source_id=src_id,
-                    match_distance_arcsec=dist,
-                    source_ra_deg=ra,
-                    source_dec_deg=dec,
-                    match_version=match_version,
-                ))
-                notifications_to_create.append(Notification(
-                    alert_id=dia_id,
-                    destination='hopskotch',
-                    payload={
-                        'diaObjectId': int(dia_id),
-                        'ra': float(ra),
-                        'dec': float(dec),
-                        'catalog_name': catalog_name,
-                        'catalog_source_id': src_id,
-                        'separation_arcsec': float(dist),
-                    },
-                ))
+                    # Catalog-specific core columns: lowercase keys, JSON-native
+                    # values, stable key set (see matching/payload.py). Stored on
+                    # the match record and nested under 'catalog_payload' in the
+                    # published notification; top-level metadata is unchanged.
+                    catalog_payload = build_catalog_payload(
+                        {col: getattr(row, col) for col in payload_cols},
+                        payload_cols,
+                    )
+
+                    match = CatalogMatch(
+                        alert_id=dia_id,
+                        catalog_name=catalog_name,
+                        catalog_source_id=src_id,
+                        match_distance_arcsec=dist,
+                        source_ra_deg=ra,
+                        source_dec_deg=dec,
+                        catalog_payload=catalog_payload,
+                        match_version=match_version,
+                    )
+                    notification = Notification(
+                        alert_id=dia_id,
+                        destination='hopskotch',
+                        payload={
+                            'diaObjectId': int(dia_id),
+                            'ra': float(ra),
+                            'dec': float(dec),
+                            'catalog_name': catalog_name,
+                            'catalog_source_id': src_id,
+                            'separation_arcsec': float(dist),
+                            'catalog_payload': catalog_payload,
+                        },
+                    )
+                except Exception:
+                    logger.exception('Skipping unbuildable match row',
+                                     catalog=catalog_name)
+                    continue
+                matches_to_create.append(match)
+                notifications_to_create.append(notification)
 
             CatalogMatch.objects.bulk_create(
                 matches_to_create, batch_size=5000, ignore_conflicts=True
