@@ -35,6 +35,22 @@ CROSSMATCH_CATALOGS = [
         'source_id_column': 'source_id',
         'ra_column': 'ra',
         'dec_column': 'dec',
+        # Core payload columns (upstream-native case; Gaia is lowercase).
+        # Lowercasing for the published payload happens at build time.
+        'payload_columns': [
+            # brightness
+            'phot_g_mean_mag', 'phot_bp_mean_mag', 'phot_rp_mean_mag',
+            'phot_g_mean_flux_over_error', 'phot_bp_mean_flux_over_error',
+            'phot_rp_mean_flux_over_error',
+            # location
+            'ra', 'dec', 'ra_error', 'dec_error', 'parallax', 'parallax_error',
+            'pmra', 'pmra_error', 'pmdec', 'pmdec_error', 'ref_epoch',
+            # classification
+            'classprob_dsc_combmod_star', 'classprob_dsc_combmod_galaxy',
+            'classprob_dsc_combmod_quasar',
+            # quality
+            'ruwe', 'astrometric_excess_noise', 'astrometric_excess_noise_sig',
+        ],
     },
     {
         'name': 'des_y6_gold',
@@ -42,6 +58,26 @@ CROSSMATCH_CATALOGS = [
         'source_id_column': 'COADD_OBJECT_ID',
         'ra_column': 'RA',
         'dec_column': 'DEC',
+        # Core payload columns (upstream-native case; DES is UPPERCASE).
+        # RA/DEC use the UPPERCASE form so the loader dedups them against
+        # ra_column/dec_column instead of requesting a non-existent column.
+        'payload_columns': [
+            # brightness (5 bands: g r i z Y)
+            'WAVG_MAG_PSF_G', 'WAVG_MAG_PSF_R', 'WAVG_MAG_PSF_I',
+            'WAVG_MAG_PSF_Z', 'WAVG_MAG_PSF_Y',
+            'WAVG_MAGERR_PSF_G', 'WAVG_MAGERR_PSF_R', 'WAVG_MAGERR_PSF_I',
+            'WAVG_MAGERR_PSF_Z', 'WAVG_MAGERR_PSF_Y',
+            # location
+            'RA', 'DEC',
+            # shape
+            'BDF_T', 'BDF_G_1', 'BDF_G_2', 'BDF_FRACDEV',
+            # photo-z
+            'DNF_Z', 'DNF_ZSIGMA',
+            # classification
+            'EXT_MASH',
+            # quality
+            'FLAGS_GOLD', 'FLAGS_FOREGROUND', 'FLAGS_FOOTPRINT', 'BDF_FLAGS',
+        ],
     },
     {
         'name': 'delve_dr3_gold',
@@ -49,6 +85,25 @@ CROSSMATCH_CATALOGS = [
         'source_id_column': 'COADD_OBJECT_ID',
         'ra_column': 'RA',
         'dec_column': 'DEC',
+        # Core payload columns (upstream-native case; DELVE is UPPERCASE).
+        # Same as DES Y6 Gold minus the Y band (DELVE has g r i z only).
+        'payload_columns': [
+            # brightness (4 bands: g r i z)
+            'WAVG_MAG_PSF_G', 'WAVG_MAG_PSF_R', 'WAVG_MAG_PSF_I',
+            'WAVG_MAG_PSF_Z',
+            'WAVG_MAGERR_PSF_G', 'WAVG_MAGERR_PSF_R', 'WAVG_MAGERR_PSF_I',
+            'WAVG_MAGERR_PSF_Z',
+            # location
+            'RA', 'DEC',
+            # shape
+            'BDF_T', 'BDF_G_1', 'BDF_G_2', 'BDF_FRACDEV',
+            # photo-z
+            'DNF_Z', 'DNF_ZSIGMA',
+            # classification
+            'EXT_MASH',
+            # quality
+            'FLAGS_GOLD', 'FLAGS_FOREGROUND', 'FLAGS_FOOTPRINT', 'BDF_FLAGS',
+        ],
     },
     {
         'name': 'skymapper_dr4',
@@ -56,6 +111,20 @@ CROSSMATCH_CATALOGS = [
         'source_id_column': 'object_id',
         'ra_column': 'raj2000',
         'dec_column': 'dej2000',
+        # Core payload columns (upstream-native case; SkyMapper is lowercase
+        # with J2000 coordinate suffix, preserved in the payload). Only PSF
+        # photometry exists here; no shape or photo-z columns.
+        'payload_columns': [
+            # brightness (6 bands: u v g r i z)
+            'u_psf', 'v_psf', 'g_psf', 'r_psf', 'i_psf', 'z_psf',
+            'e_u_psf', 'e_v_psf', 'e_g_psf', 'e_r_psf', 'e_i_psf', 'e_z_psf',
+            # location
+            'raj2000', 'dej2000', 'e_raj2000', 'e_dej2000',
+            # classification
+            'class_star',
+            # quality
+            'flags', 'nimaflags', 'ngood',
+        ],
     },
 ]
 
