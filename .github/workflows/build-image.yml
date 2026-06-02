@@ -5,9 +5,10 @@ name: Build and publish image
 # crossmatch-service-k8s-gitops Helm chart, which pins a released version in its
 # values overlay.
 #
-# One-time setup: the first push creates a PRIVATE GHCR package. Make it public
-# (org Packages -> crossmatch-service -> Package settings -> Change visibility ->
-# Public) so the Jetstream2 cluster can pull anonymously with no pull secret.
+# The package is PRIVATE and stays private (SCiMMA org policy forbids public
+# packages). The Jetstream2 cluster pulls it with a sealed `ghcr-registry`
+# dockerconfigjson secret (a GitHub PAT with read:packages) — see the gitops
+# repo's docs/kubeseal-workflow.md and docs/dev-bootstrap-steps.md.
 
 on:
   push:
