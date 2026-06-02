@@ -14,7 +14,7 @@ origin: docs/brainstorms/2026-06-01-crossmatch-service-k8s-gitops-requirements.m
 
 ## Summary
 
-Stand up the `crossmatch-service-k8s-gitops` repository (astrodash-modeled) and deploy crossmatch-service to the existing Jetstream2 DEV cluster via ArgoCD: bootstrap the cluster infra that isn't present yet (sealed-secrets, Traefik, cert-manager), relocate the existing Helm chart in as the single source of truth, adapt it from its AWS-EKS heritage to Jetstream2 (GitLab registry, SealedSecrets, Cinder, persistent Postgres), author a flower workload behind ingress + TLS, and add a Tier-2 env-var drift guardrail. DEV-only, structured so test/prod slot in later.
+Stand up the `crossmatch-service-k8s-gitops` repository (astrodash-modeled) and deploy crossmatch-service to the existing Jetstream2 DEV cluster via ArgoCD: bootstrap the cluster infra that isn't present yet (sealed-secrets, Traefik, cert-manager), relocate the existing Helm chart in as the single source of truth, adapt it from its AWS-EKS heritage to Jetstream2 (public GHCR image, SealedSecrets, Cinder, persistent Postgres), author a flower workload behind ingress + TLS, and add a Tier-2 env-var drift guardrail. DEV-only, structured so test/prod slot in later.
 
 ---
 
@@ -42,7 +42,7 @@ Traced to the origin requirements doc (see origin: `docs/brainstorms/2026-06-01-
 - R7. cert-manager issues TLS via a Let's Encrypt production ClusterIssuer; Traefik is the ingress class and enforces an HTTP→HTTPS redirect (origin R7).
 
 **Application chart adaptation (EKS → Jetstream2)**
-- R8. Images move from ECR to the GitLab Container Registry, pulled via a `read_registry`-scoped, long-lived deploy-token credential stored as a committed `dockerconfigjson` SealedSecret; expiry/rotation documented (origin R8).
+- R8. The image moves off ECR to GitHub Container Registry as a **public** package (`ghcr.io/scimma/crossmatch-service`), built by a GitHub Actions workflow in the app repo (built-in `GITHUB_TOKEN`). The chart references it and the cluster pulls anonymously — no pull secret (origin R8).
 - R9. Persistent storage uses the Jetstream2 Cinder storage class, replacing `gp2` (origin R9).
 - R10. Postgres runs on a persistent Cinder PVC, replacing `emptyDir` (origin R10).
 - R11. All existing workloads carry over with no change to their container spec or run commands — antares/lasair/pittgoogle consumers, celery worker and beat, valkey subchart, postgres — except Postgres storage (R10) and the newly-authored flower workload (R17) (origin R11).
@@ -74,7 +74,7 @@ Traced to the origin requirements doc (see origin: `docs/brainstorms/2026-06-01-
 - **Dedicated DEV cluster, infra bootstrapped in-repo** — the cluster has only ArgoCD, so sealed-secrets/Traefik/cert-manager are not pre-existing; this repo owns them as ArgoCD Applications. (If a second service later shares the cluster, singleton ownership moves to a shared bootstrap repo — see Open Questions.)
 - **ClusterIssuer ships inside the app chart with an ArgoCD sync-wave** — mirrors astrodash (`apps/astrodash/templates/clusterissuer.yaml`, `argocd.argoproj.io/sync-wave: "1"`), so the issuer applies only after cert-manager CRDs exist; otherwise first sync fails on a missing CRD.
 - **SealedSecrets with controller-key backup** — committed encrypted secrets, but the bootstrap doc backs up the controller private key first, since committed SealedSecrets are unrecoverable once plaintext originals are removed (origin R6/R13).
-- **GitLab registry + `read_registry` deploy token** — off ECR (12h token expiry is painful off-AWS); long-lived `dockerconfigjson` SealedSecret, astrodash's `gitlab-registry` pattern (origin R8).
+- **Public GHCR image** — off ECR (12h token expiry painful off-AWS), and off the GitLab registry too: the source is on GitHub, so build/push to `ghcr.io/scimma/crossmatch-service` via GitHub Actions (`GITHUB_TOKEN`) and publish the package public, so the cluster pulls with no secret. Diverges from astrodash's GitLab-registry host (cosmetic on the deploy side) but removes a cross-platform build credential and the pull-secret rotation surface (origin R8).
 - **Persistent Postgres on Cinder** — `emptyDir` → PVC so DEV data survives restarts (origin R10).
 - **Ingress defaults to IP-allowlist until auth** — flower exposes Celery internals; the ingress is gated by allowlist/network-policy until oauth2-proxy lands (origin R12, doc-review).
 - **Verification is render/lint/sync/smoke, not unit tests** — the repo has no working test runner; acceptance gates are `helm lint`/`helm template` assertions, ArgoCD sync health, and a single-alert end-to-end smoke run (learnings: `crossmatch-service:docs/solutions/conventions/dependency-pin-upgrade-pattern-2026-05-12.md`).
@@ -147,8 +147,7 @@ crossmatch-service-k8s-gitops/
 │           ├── service-flower.yaml      # new
 │           ├── ingress.yaml             # new (values-gated, allowlist)
 │           ├── clusterissuer.yaml       # sync-wave 1
-│           ├── sealedsecret-dev.yaml
-│           └── sealedsecret-registry-dev.yaml
+│           └── sealedsecret-dev.yaml
 ├── argocd-apps/
 │   ├── crossmatch-service-dev.yaml
 │   ├── sealed-secrets.yaml
@@ -211,21 +210,21 @@ Grouped into three phases. U-IDs are stable.
 - **Goal:** Replace AWS assumptions with Jetstream2 equivalents.
 - **Requirements:** R8, R9, R10
 - **Dependencies:** U3
-- **Files (gitops repo):** `apps/crossmatch-service/values.yaml`, `values-dev.yaml`, `templates/database.yaml`, `templates/sealedsecret-registry-dev.yaml`
-- **Approach:** Point `common.image.repo` at the GitLab registry path; add the `gitlab-registry` `dockerconfigjson` SealedSecret and `imagePullSecrets` on each workload. Replace `gp2` with the Jetstream2 Cinder storage class. Convert Postgres from `emptyDir` to a PVC (pin mount path / `PGDATA` to avoid the `lost+found` interaction noted in review).
-- **Patterns to follow:** `astrodash-k8s-gitops:apps/astrodash/templates/sealedsecret-registry-dev.yaml`; astrodash Cinder PVC usage.
+- **Files (gitops repo):** `apps/crossmatch-service/values.yaml`, `values-dev.yaml`, `templates/database.yaml`
+- **Approach:** Point `common.image.repo` at the public GHCR image (`ghcr.io/scimma/crossmatch-service`); no pull secret or `imagePullSecrets` needed (public package). Replace `gp2` with the Jetstream2 Cinder storage class. Convert Postgres from `emptyDir` to a PVC (pin mount path / `PGDATA` to avoid the `lost+found` interaction noted in review).
+- **Patterns to follow:** astrodash Cinder PVC usage.
 - **Test scenarios:**
-  - `helm template` shows every workload carries `imagePullSecrets: gitlab-registry` and GitLab image refs (no `dkr.ecr` strings remain).
+  - `helm template` shows every workload uses the GHCR image ref and no `imagePullSecrets` (no `dkr.ecr` or `registry.gitlab.com` strings remain).
   - Rendered Postgres uses a `PersistentVolumeClaim` with the Cinder storage class; no `emptyDir` for postgres data.
   - Covers AE3: after deploy, deleting the Postgres pod and rescheduling preserves previously ingested DEV rows.
-- **Verification:** Render shows GitLab refs + pull secret + Cinder PVC; smoke confirms data persistence.
+- **Verification:** Render shows GHCR refs (no pull secret) + Cinder PVC; smoke confirms data persistence.
 
 ### U5. Migrate secrets to SealedSecrets + kubeseal workflow
 - **Goal:** Replace the kubectl-secret flow with committed SealedSecrets and document sealing.
 - **Requirements:** R13, R14a
 - **Dependencies:** U2 (controller must exist), U3
 - **Files (gitops repo):** `apps/crossmatch-service/templates/sealedsecret-dev.yaml`, `docs/kubeseal-workflow.md`; reconcile/relocate `crossmatch-service:kubernetes/scripts/secret_generator/seal_secrets.py`
-- **Approach:** Author SealedSecret resources (env-conditional like astrodash) for `django`, `database`, `antares`, `hopskotch`, `gcp-pittgoogle` (the last is the file-based `key.json`). Document the ingestion procedure: source plaintext from a secret store (never `dev-overrides.yaml`), run `kubeseal` locally, commit only the sealed YAML. Pin the kubeseal target to the bootstrapped controller (`--controller-name sealed-secrets --controller-namespace kube-system`, `namespace-wide` scope) consistently across the script, the workflow doc, and the SealedSecret annotations — the existing script's `sealedsecrets-sealed-secrets` / `sealed-secrets` / `cluster-wide` target will not match. For `gcp-pittgoogle`, document the minimum IAM scope (Pub/Sub Subscriber on the specific subscription only), rotation cadence, and revoke-plus-re-seal procedure, parallel to R8's deploy-token treatment. Pin one secret-key name end-to-end for the Django secret (the `encryptedData` key, the `secretKeyRef.key`, and U6's emitted env all `DJANGO_SECRET_KEY`) so U5 and U6 cannot diverge. Decide `seal_secrets.py` disposition (relocate into the gitops repo or supersede with the doc) per R14b.
+- **Approach:** Author SealedSecret resources (env-conditional like astrodash) for `django`, `database`, `antares`, `hopskotch`, `gcp-pittgoogle` (the last is the file-based `key.json`). Document the ingestion procedure: source plaintext from a secret store (never `dev-overrides.yaml`), run `kubeseal` locally, commit only the sealed YAML. Pin the kubeseal target to the bootstrapped controller (`--controller-name sealed-secrets --controller-namespace kube-system`, `namespace-wide` scope) consistently across the script, the workflow doc, and the SealedSecret annotations — the existing script's `sealedsecrets-sealed-secrets` / `sealed-secrets` / `cluster-wide` target will not match. For `gcp-pittgoogle`, document the minimum IAM scope (Pub/Sub Subscriber on the specific subscription only), rotation cadence, and revoke-plus-re-seal procedure. Pin one secret-key name end-to-end for the Django secret (the `encryptedData` key, the `secretKeyRef.key`, and U6's emitted env all `DJANGO_SECRET_KEY`) so U5 and U6 cannot diverge. Decide `seal_secrets.py` disposition (relocate into the gitops repo or supersede with the doc) per R14b.
 - **Patterns to follow:** `astrodash-k8s-gitops:apps/astrodash/templates/sealedsecret-dev.yaml`; existing secret consumers in `crossmatch-service:kubernetes/charts/crossmatch-service/templates/_helpers.yaml` (`secretKeyRef` names).
 - **Execution note:** Seal against the DEV controller key only after U2's key-backup step is done.
 - **Test scenarios:**
@@ -333,7 +332,7 @@ Grouped into three phases. U-IDs are stable.
 
 **Outside this effort** (origin)
 - Deploying the remote Dask cluster — external dependency reached via service discovery.
-- Building the application container image and app-side CI — gitops repo is pull-only.
+- Building the application container image and app-side CI (a GitHub Actions workflow publishing the public GHCR image) — gitops repo is pull-only.
 
 **Deferred to Follow-Up Work** (plan-local)
 - Singleton-infrastructure ownership refactor (move sealed-secrets/Traefik/cert-manager to a shared bootstrap repo) — only needed when a second service joins the cluster.
@@ -345,7 +344,7 @@ Grouped into three phases. U-IDs are stable.
 **Resolve before / during implementation**
 - Confirm the DEV cluster is dedicated (not astrodash-dev) with no pre-installed sealed-secrets/Traefik/cert-manager controllers, before U2 runs — if it is shared, U2 would collide with astrodash's singletons and must instead cross-reference existing infra.
 - The exact DEV hostname(s) for ingress/TLS and which service is exposed first (flower assumed).
-- The GitLab project path/namespace for the new repo and the registry image location.
+- The GitHub Actions workflow that builds and publishes the public GHCR image (app-repo work) does not exist yet — a hard prerequisite for deploy. (Repo host and image location are now decided: gitops repo `ncsa-caps-rse/crossmatch-service-k8s-gitops` on GitLab; image `ghcr.io/scimma/crossmatch-service`.)
 - Confirmation that the test/prod team does not deploy from the app-repo chart (gates U11).
 - The Dask scheduler Service name/namespace on Jetstream2 DEV and how `DASK_SCHEDULER_ADDRESS` (or the `HOPDEVEL_*_SERVICE_HOST` discovery vars) is populated — the celery worker fail-fasts after ~300s if unreachable, so the U8 smoke run depends on this.
 
@@ -375,14 +374,14 @@ Grouped into three phases. U-IDs are stable.
 
 - The DEV Jetstream2 cluster is dedicated/fresh for crossmatch with only ArgoCD installed (inferred from "only ArgoCD is present"); sealed-secrets/Traefik/cert-manager are absent and bootstrapped here.
 - A Cinder storage class is available on the cluster.
-- A GitLab project + Container Registry + `read_registry` deploy token are available under the relevant SCiMMA / `ncsa-caps-rse` org.
+- The gitops repo is hosted at `ncsa-caps-rse/crossmatch-service-k8s-gitops` on GitLab, and the image is published as a public GHCR package `ghcr.io/scimma/crossmatch-service` by a GitHub Actions workflow in the app repo.
 - DNS for a DEV hostname can be pointed at the cluster for HTTP-01.
 
 ---
 
 ## Sources / Research
 
-- Reference repo (layout, infra Applications, SealedSecret + GitLab registry + ClusterIssuer sync-wave patterns): `astrodash-k8s-gitops` (`apps/astrodash/`, `argocd-apps/`, `docs/prod-bootstrap-steps.md`).
+- Reference repo (layout, infra Applications, SealedSecret + ClusterIssuer sync-wave patterns): `astrodash-k8s-gitops` (`apps/astrodash/`, `argocd-apps/`, `docs/prod-bootstrap-steps.md`).
 - Existing chart being relocated/adapted: `crossmatch-service:kubernetes/charts/crossmatch-service/` (`Chart.yaml`, `values.yaml`, `templates/{_helpers.yaml,statefulset.yaml,database.yaml}`).
 - Consumer env surface: `crossmatch-service:crossmatch/project/settings.py`, `crossmatch-service:crossmatch/entrypoints/`.
 - Component inventory: `crossmatch-service:docker/docker-compose.yaml`.
