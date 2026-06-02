@@ -1,0 +1,203 @@
+# Deploy env-var contract for crossmatch-service.
+#
+# Source of truth for the environment variables the service consumes, derived
+# from the full consumer surface: crossmatch/project/settings.py, the entrypoint
+# scripts under crossmatch/entrypoints/, and the Celery configuration.
+#
+# Consumed by the render-diff guardrail CI in the crossmatch-service-k8s-gitops
+# repo (helm template -> compare delivered env keys against this contract).
+#
+# Fields per var:
+#   source: plain | secret
+#   secret: <secret name>     (only when source: secret)
+#   components: workloads that MUST receive the var
+#                (antares-consumer, lasair-consumer, pittgoogle-consumer,
+#                 celery-worker, celery-beat, flower, postgres)
+#
+# This contract governs the application's own workloads only. The third-party
+# valkey subchart's env is out of scope and excluded by the CI extractor.
+
+version: 1
+
+vars:
+  # --- Django / app core (consumers + flower load Django settings) ---
+  - name: DJANGO_SECRET_KEY
+    source: secret
+    secret: django
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, flower]
+  - name: DJANGO_SUPERUSER_PASSWORD
+    source: secret
+    secret: django
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, flower]
+  - name: DJANGO_SUPERUSER_USERNAME
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, flower]
+  - name: DJANGO_SUPERUSER_EMAIL
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, flower]
+  - name: DJANGO_DEBUG
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, flower]
+  - name: LOG_LEVEL
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, flower]
+  - name: DEV_MODE
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+  - name: MAKE_MIGRATIONS
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+  - name: APP_ROOT_DIR
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+
+  # --- Database ---
+  - name: DATABASE_HOST
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+  - name: DATABASE_PORT
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+  - name: DATABASE_USER
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+  - name: DATABASE_DB
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+  - name: DATABASE_PASSWORD
+    source: secret
+    secret: database
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+
+  # --- Valkey (message broker / result backend) ---
+  - name: VALKEY_SERVICE
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+  - name: VALKEY_PORT
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, celery-beat, flower]
+
+  # --- Celery ---
+  - name: CELERY_TASK_TIME_LIMIT
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, flower]
+  - name: CELERY_TASK_SOFT_TIME_LIMIT
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, flower]
+  - name: CELERY_CONCURRENCY
+    source: plain
+    components: [celery-worker]
+  - name: CELERY_LOG_LEVEL
+    source: plain
+    components: [celery-worker]
+  - name: DASK_SCHEDULER_ADDRESS
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, flower]
+  - name: DASK_VERSION_CHECK_TIMEOUT_SECONDS
+    source: plain
+    components: [antares-consumer, lasair-consumer, pittgoogle-consumer, celery-worker, flower]
+
+  # --- ANTARES consumer ---
+  - name: ANTARES_API_KEY
+    source: secret
+    secret: antares
+    components: [antares-consumer]
+  - name: ANTARES_API_SECRET
+    source: secret
+    secret: antares
+    components: [antares-consumer]
+  - name: ANTARES_TOPIC
+    source: plain
+    components: [antares-consumer]
+  - name: ANTARES_GROUP_ID
+    source: plain
+    components: [antares-consumer]
+
+  # --- Lasair consumer ---
+  - name: LASAIR_KAFKA_SERVER
+    source: plain
+    components: [lasair-consumer]
+  - name: LASAIR_TOPIC
+    source: plain
+    components: [lasair-consumer]
+  - name: LASAIR_GROUP_ID
+    source: plain
+    components: [lasair-consumer]
+
+  # --- Pitt-Google consumer ---
+  # MIN_DIASOURCE_RELIABILITY is read in code ONLY by the pittgoogle consumer
+  # (builds the SMT UDF). antares does not read it; lasair's cut is enforced
+  # upstream by topic selection. Do not require it on other components.
+  - name: MIN_DIASOURCE_RELIABILITY
+    source: plain
+    components: [pittgoogle-consumer]
+  - name: PITTGOOGLE_TOPIC
+    source: plain
+    components: [pittgoogle-consumer]
+  - name: PITTGOOGLE_SUBSCRIPTION
+    source: plain
+    components: [pittgoogle-consumer]
+  - name: PITTGOOGLE_PUBLISHER_PROJECT
+    source: plain
+    components: [pittgoogle-consumer]
+  - name: GOOGLE_APPLICATION_CREDENTIALS
+    source: plain
+    components: [pittgoogle-consumer]
+  - name: GOOGLE_CLOUD_PROJECT
+    source: secret
+    secret: gcp-pittgoogle
+    components: [pittgoogle-consumer]
+
+  # --- Hopskotch publish (celery worker) ---
+  - name: HOPSKOTCH_BROKER_URL
+    source: plain
+    components: [celery-worker]
+  - name: HOPSKOTCH_TOPIC
+    source: plain
+    components: [celery-worker]
+  - name: HOPSKOTCH_USERNAME
+    source: secret
+    secret: hopskotch
+    components: [celery-worker]
+  - name: HOPSKOTCH_PASSWORD
+    source: secret
+    secret: hopskotch
+    components: [celery-worker]
+
+  # --- Crossmatch (worker + beat dispatch) ---
+  - name: GAIA_HATS_URL
+    source: plain
+    components: [celery-worker, celery-beat, flower]
+  - name: DES_HATS_URL
+    source: plain
+    components: [celery-worker, celery-beat, flower]
+  - name: DELVE_HATS_URL
+    source: plain
+    components: [celery-worker, celery-beat, flower]
+  - name: SKYMAPPER_HATS_URL
+    source: plain
+    components: [celery-worker, celery-beat, flower]
+  - name: CROSSMATCH_RADIUS_ARCSEC
+    source: plain
+    components: [celery-worker, celery-beat, flower]
+  - name: CROSSMATCH_BATCH_MAX_WAIT_SECONDS
+    source: plain
+    components: [celery-worker, celery-beat, flower]
+  - name: CROSSMATCH_BATCH_MAX_SIZE
+    source: plain
+    components: [celery-worker, celery-beat, flower]
+
+  # --- Flower (entrypoint-consumed; not all in settings.py) ---
+  - name: FLOWER_PORT
+    source: plain
+    components: [flower]
+  - name: FLOWER_URL_PREFIX
+    source: plain
+    components: [flower]
+  - name: FLOWER_UNAUTHENTICATED_API
+    source: plain
+    components: [flower]
+  - name: FLOWER_LOG_LEVEL
+    source: plain
+    optional: true            # run_flower.sh defaults to WARNING if unset
+    components: [flower]
