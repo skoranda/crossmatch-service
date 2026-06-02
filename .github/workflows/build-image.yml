@@ -1,14 +1,19 @@
 name: Build and publish image
 
-# Builds the crossmatch-service container image and publishes it to the GitHub
-# Container Registry (GHCR) on semver release tags. The image is consumed by the
+# Builds the crossmatch-service container image and publishes it to the GitLab
+# Container Registry on semver release tags. The image is consumed by the
 # crossmatch-service-k8s-gitops Helm chart, which pins a released version in its
 # values overlay.
 #
-# The package is PRIVATE and stays private (SCiMMA org policy forbids public
-# packages). The Jetstream2 cluster pulls it with a sealed `ghcr-registry`
-# dockerconfigjson secret (a GitHub PAT with read:packages) — see the gitops
-# repo's docs/kubeseal-workflow.md and docs/dev-bootstrap-steps.md.
+# Why GitLab and not GHCR: the scimma GitHub org denies the Actions GITHUB_TOKEN
+# from pushing org packages (and forbids public GHCR packages). The image is a
+# PUBLIC package in the gitops project's GitLab registry, so the Jetstream2
+# cluster pulls it anonymously — no pull secret.
+#
+# Required GitHub Actions secrets (a GitLab deploy token scoped write_registry on
+# ncsa-caps-rse/crossmatch-service-k8s-gitops):
+#   GITLAB_REGISTRY_USER   — the deploy token username
+#   GITLAB_REGISTRY_TOKEN  — the deploy token value
 
 on:
   push:
@@ -18,7 +23,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build-push:
@@ -27,18 +31,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Log in to GHCR
+      - name: Log in to the GitLab registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: registry.gitlab.com
+          username: ${{ secrets.GITLAB_REGISTRY_USER }}
+          password: ${{ secrets.GITLAB_REGISTRY_TOKEN }}
 
       - name: Derive image tags and labels
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/scimma/crossmatch-service
+          images: registry.gitlab.com/ncsa-caps-rse/crossmatch-service-k8s-gitops
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
