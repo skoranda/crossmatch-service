@@ -1,0 +1,59 @@
+name: Build and publish image
+
+# Builds the crossmatch-service container image and publishes it to the GitHub
+# Container Registry (GHCR) on semver release tags. The image is consumed by the
+# crossmatch-service-k8s-gitops Helm chart, which pins a released version in its
+# values overlay.
+#
+# One-time setup: the first push creates a PRIVATE GHCR package. Make it public
+# (org Packages -> crossmatch-service -> Package settings -> Change visibility ->
+# Public) so the Jetstream2 cluster can pull anonymously with no pull secret.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"          # e.g. v0.1.0 -> image tags 0.1.0, 0.1, latest
+  workflow_dispatch: {}   # manual run; produces a sha-<shortsha> tag only (no semver)
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/scimma/crossmatch-service
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # Matches docker/docker-compose.yaml: build context is the Django
+          # package dir; the Dockerfile lives outside it under docker/.
+          context: crossmatch
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
