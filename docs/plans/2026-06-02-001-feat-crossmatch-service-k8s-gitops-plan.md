@@ -294,7 +294,7 @@ Grouped into three phases. U-IDs are stable.
 - **Requirements:** R19
 - **Dependencies:** U3, U9
 - **Files (gitops repo):** CI config (e.g., `.gitlab-ci.yml` or `.github/workflows/render-diff.yml`) + a small render/extract script
-- **Approach:** CI runs `helm template` with `values-dev.yaml`, extracts env keys delivered to **the app's own workloads** (consumers, celery worker/beat, flower, postgres) — explicitly excluding the third-party valkey subchart pods, whose env is not part of the app consumer surface the contract governs — and compares against the app-repo contract fetched at a pinned ref. Fail on: required plain var undelivered; required secret with no SealedSecret; secret-tagged var delivered as a plain `value:`. Cross-repo read auth uses a GitLab deploy token scoped `read_repository` on the app repo only, stored as a masked CI variable and never echoed in logs. Decide pinned-ref mechanism (submodule vs pinned raw fetch).
+- **Approach:** CI runs `helm template` with `values-dev.yaml`, extracts env keys delivered to **the app's own workloads** (consumers, celery worker/beat, flower, postgres) — explicitly excluding the third-party valkey subchart pods, whose env is not part of the app consumer surface the contract governs — and compares against the app-repo contract fetched at a pinned ref. Fail on: required plain var undelivered; required secret with no SealedSecret; secret-tagged var delivered as a plain `value:`. The application repo is public GitHub (`scimma/crossmatch-service`), so the CI clones it anonymously — no deploy token or CI credentials — and checks out the pinned `CONTRACT_REF` commit.
 - **Patterns to follow:** none local (new capability — astrodash is pull-only); document the approach in the gitops `docs/`.
 - **Test scenarios:**
   - Covers AE1: a contract var removed from the chart fails CI with the missing key named.
@@ -352,7 +352,7 @@ Grouped into three phases. U-IDs are stable.
 **Deferred to implementation**
 - Cinder storage class name and PVC sizes (Postgres; valkey if persisted).
 - The application namespace name on the DEV cluster.
-- Pinned-ref mechanism for the contract (submodule vs pinned raw fetch) and cross-repo CI read auth (U10).
+- Keeping `CONTRACT_REF` current when the contract changes on the app repo's `main` (the CI anonymously clones the public GitHub repo and checks out that SHA — no auth needed).
 - `seal_secrets.py` final disposition (relocate vs supersede) — settle in U5 (owned by R14b).
 
 ### From 2026-06-02 review
@@ -367,7 +367,7 @@ Grouped into three phases. U-IDs are stable.
 - **HTTP-01 reachability** — Let's Encrypt issuance needs the DEV host publicly resolvable and port 80 reachable; if the cluster is campus/VPN-gated, TLS (R7/R12) can't complete even though the wiring lands.
 - **SealedSecrets key custody** — losing the controller key after plaintext removal makes all secrets unrecoverable; mitigated by the U2 backup step.
 - **No working test runner** — `manage.py test` finds zero tests; do not treat a green test step as deploy signal. The single-alert smoke run is the gate.
-- **Cross-repo CI coupling (U10)** — the gitops CI must authenticate to and fetch the app-repo contract at a pinned ref; pin bumps are a manual, reviewed event (a slow-drift window by design).
+- **Cross-repo CI coupling (U10)** — the gitops CI anonymously clones the public GitHub app repo and checks out the pinned `CONTRACT_REF`; SHA bumps are a manual, reviewed event (a slow-drift window by design).
 
 ---
 
