@@ -1,6 +1,6 @@
-# LSST Alert Matching Service Architecture (ANTARES + Lasair + Pitt-Google + Gaia + DES)
+# LSST Alert Matching Service Architecture (ANTARES + Lasair + Pitt-Google brokers × HATS catalogs)
 
-This document defines a Python-based service architecture that receives Rubin/LSST alerts from the **ANTARES**, **Lasair**, and **Pitt-Google** brokers, matches them against the **Gaia DR3** and **DES Y6 Gold** catalogs using **LSDB**, and records results for eventual **feedback to LSST** (return mechanism TBD).
+This document defines a Python-based service architecture that receives Rubin/LSST alerts from the **ANTARES**, **Lasair**, and **Pitt-Google** brokers, matches them against multiple HATS catalogs using **LSDB** (Gaia DR3, DES Y6 Gold, DELVE DR3 Gold, and SkyMapper DR4 today — see §7.3 for the authoritative roster and asymmetry callout), and records results for eventual **feedback to LSST** (return mechanism TBD).
 
 It is an iteration of the original design, updated to:
 - Use **Celery** for work orchestration
