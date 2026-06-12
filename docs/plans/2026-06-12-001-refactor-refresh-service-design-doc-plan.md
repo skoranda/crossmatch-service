@@ -1,5 +1,5 @@
 ---
-status: active
+status: completed
 type: refactor
 origin: docs/brainstorms/2026-06-12-refresh-service-design-doc-requirements.md
 date: 2026-06-12
