@@ -115,10 +115,10 @@ Three independent ingest services consume from separate broker streams and write
 
 **C. Crossmatch Workers (Celery workers; runs in our Kubernetes cluster; horizontally scaled)**
 - Consume batch crossmatch jobs from Celery.
-- Use LSDB to match alerts against all configured HATS catalogs (currently **Gaia DR3** and **DES Y6 Gold**) via `lsdb.from_dataframe()` + `catalog.crossmatch()`.
+- Use LSDB to match alerts against all configured HATS catalogs via `lsdb.from_dataframe()` + `catalog.crossmatch()`. See §7.3 for the authoritative per-catalog roster.
 - LSDB operates on HATS-formatted (HEALPix-partitioned Parquet) catalogs and uses **Dask** under the hood for parallel, distributed computation. When `DASK_SCHEDULER_ADDRESS` is set, each worker connects to a remote Dask scheduler at startup via `dask.distributed.Client`, offloading computation to dedicated Dask workers. When unset, Dask runs locally within the Celery worker process using the default synchronous scheduler.
-- Catalogs are defined in a configurable registry (`CROSSMATCH_CATALOGS` in Django settings). Each entry specifies the catalog name, HATS URL, source ID column, and RA/Dec column names (which vary per catalog — e.g., lowercase `ra`/`dec` for Gaia, uppercase `RA`/`DEC` for DES).
-- The Gaia DR3 HATS catalog is accessed from the **public S3 bucket** `s3://stpubdata/hats/gaia/dr3/` (no credentials required). The DES Y6 Gold HATS catalog is accessed from `https://data.lsdb.io/hats/des/des_y6_gold`.
+- Catalogs are defined in a configurable registry (`CROSSMATCH_CATALOGS` in Django settings). Each entry specifies the catalog name, HATS URL, source ID column, RA/Dec column names, and `payload_columns` declaring the upstream-native columns to fetch and publish for that catalog (per-catalog config detail in §7.3).
+- Catalog HATS URLs come from per-catalog env vars (e.g., `GAIA_HATS_URL`, `DES_HATS_URL`, `DELVE_HATS_URL`, `SKYMAPPER_HATS_URL`); the Gaia DR3 default points at the public S3 bucket `s3://stpubdata/hats/gaia/dr3/` (no credentials required); the other defaults point at `https://data.lsdb.io/hats/...` mirrors. Authoritative per-catalog details live in §7.3.
 - Each catalog object is cached in a module-level dict (`_catalog_cache`) keyed by catalog name within each worker process (metadata only; lightweight).
 - Alert batches (up to 100k) are converted to an LSDB catalog via `from_dataframe()` with adaptive HEALPix partitioning, then crossmatched sequentially against each configured catalog. LSDB loads only the HATS partitions that overlap the alert positions.
 - Per-catalog error isolation: if crossmatching fails for one catalog, the remaining catalogs are still processed.
@@ -219,12 +219,12 @@ must be re-issued / re-created to use `>=` for consistency.
    - Celery Beat dispatches batch every 30s when thresholds are met
    - Load batch of QUEUED alerts into pandas DataFrame
    - Convert to LSDB catalog via `from_dataframe()`
-   - Crossmatch sequentially against all configured HATS catalogs (Gaia DR3, DES Y6 Gold)
+   - Crossmatch sequentially against all configured HATS catalogs (see §7.3)
    - Write results to `catalog_matches` (one row per catalog match)
    - Transition all alerts in batch to MATCHED
 6. Notifier service:
    - Detect new match rows
-   - Send an LSST update (TBD)
+   - Publish payloads to **SCiMMA Hopskotch** (the live channel, see §4.6); an LSST return channel remains TBD (§4.5)
    - Track in `notifications`
 
 ### 3.1 Sequence Diagram
@@ -238,16 +238,21 @@ sequenceDiagram
   participant AING as ANTARES Ingest
   participant LAS as Lasair Broker
   participant LING as Lasair Ingest
+  participant PGB as Pitt-Google Pub/Sub
+  participant PGSMT as Pitt-Google SMT UDF Filter
+  participant PGING as Pitt-Google Ingest
   participant PG as PostgreSQL
   participant RED as Valkey (Celery broker)
   participant CEL as Celery
   participant WRK as Crossmatch Workers
-  participant LSDB as LSDB (Gaia, DES)
+  participant LSDB as LSDB (HATS catalogs)
   participant NOT as Match Notifier
+  participant HOP as SCiMMA Hopskotch (Kafka)
   participant LSSTRET as LSST Update Receiver (TBD)
 
   LSST->>ANT: Publish alert packet
   LSST->>LAS: Publish alert packet
+  LSST->>PGB: Publish alert packet
 
   par ANTARES delivery
     ANT->>AFIL: Evaluate alert against ANTARES filter criteria
@@ -268,15 +273,28 @@ sequenceDiagram
       LING->>CEL: Enqueue crossmatch_alert task
       CEL->>RED: Store task message
     end
+  and Pitt-Google delivery
+    PGB->>PGSMT: Evaluate via SMT JavaScript UDF (reliability >= MIN_DIASOURCE_RELIABILITY)
+    alt Passes SMT UDF + attribute filter
+      PGB-->>PGING: Deliver alert via Pub/Sub subscription
+      PGING->>PG: UPSERT alerts (ON CONFLICT DO NOTHING) + INSERT alert_deliveries (broker=pittgoogle)
+      alt New alert (first delivery)
+        PGING->>CEL: Enqueue crossmatch_alert task
+        CEL->>RED: Store task message
+      end
+    else Filtered out
+      PGSMT-->>PGB: Drop server-side at Pub/Sub
+    end
   end
 
   RED-->>WRK: Deliver batch task
   WRK->>PG: Load QUEUED alerts (batch_ids)
-  WRK->>LSDB: from_dataframe() + crossmatch(gaia, des, ...)
-  WRK->>PG: UPSERT catalog_matches + transition to MATCHED
-  NOT->>PG: Watch for new matches
-  NOT->>LSSTRET: Send match update (TBD)
-  NOT->>PG: Record notifications state
+  WRK->>LSDB: from_dataframe() + crossmatch(all configured catalogs)
+  WRK->>PG: UPSERT catalog_matches + Notification(destination=hopskotch) + transition to MATCHED
+  NOT->>PG: Poll pending notifications (dispatch_notifications, every 10s)
+  NOT->>HOP: Publish match payload via hop-client (per §4.6)
+  NOT->>PG: Record notifications state (sent | failed)
+  NOT-->>LSSTRET: Send match update (TBD; same destination-routing registry)
 ```
 
 ---
@@ -942,13 +960,22 @@ The system uses a configurable catalog registry (`CROSSMATCH_CATALOGS` in Django
 - **DELVE DR3 Gold** — accessed from `https://data.lsdb.io/hats/delve/delve_dr3_gold` (source ID: `COADD_OBJECT_ID`, RA/Dec columns: `RA`/`DEC`)
 - **SkyMapper DR4** — accessed from `https://data.lsdb.io/hats/skymapper_dr4/catalog` (source ID: `object_id`, RA/Dec columns: `raj2000`/`dej2000`)
 
-Each catalog entry specifies: `name`, `hats_url`, `source_id_column`, `ra_column`, `dec_column`. RA/Dec column names vary per catalog (e.g., lowercase for Gaia, uppercase for DES/DELVE, J2000 suffix for SkyMapper).
+Each catalog entry specifies: `name`, `hats_url`, `source_id_column`, `ra_column`, `dec_column`, and `payload_columns`. The `payload_columns` list declares the upstream-native column names to fetch from the HATS catalog and publish (lowercased) in each match's `catalog_payload` — it is the single source of truth for what publishes for that catalog. See [`docs/solutions/conventions/catalog-specific-payload-columns.md`](docs/solutions/conventions/catalog-specific-payload-columns.md) for the full convention.
+
+**Catalogs are not symmetric.** Several properties differ per catalog and a reader (or implementer) following the "all configured catalogs" abstraction elsewhere in this doc should expect:
+
+- **Case conventions:** Gaia DR3 and SkyMapper DR4 use lowercase column names upstream; DES Y6 Gold and DELVE DR3 Gold use UPPERCASE. SkyMapper additionally carries the J2000 suffix on its coordinates (`raj2000`/`dej2000`). The case rule is preserved end-to-end: `payload_columns` is declared in upstream-native case, and lowercasing happens only at publish time (so `WAVG_MAG_PSF_G` becomes `wavg_mag_psf_g`, but `raj2000` is preserved).
+- **Footprints:** Each catalog covers a different sky region. When a batch's alert positions miss a catalog's footprint, LSDB raises `RuntimeError("Catalogs do not overlap")` and the task loop logs it and continues — no-overlap is a normal outcome (e.g., DES Y6 Gold yields no matches for alerts outside its southern footprint).
+- **Available columns:** Gaia DR3 carries astrometric columns (parallax, proper motion) that DES/DELVE/SkyMapper lack; DES and DELVE carry shape (`BDF_*`) and photo-z (`DNF_*`) columns Gaia/SkyMapper lack; DELVE drops DES's `Y` band (4 bands instead of 5); SkyMapper DR4 exposes only PSF photometry across `u v g r i z`, no shape or photo-z. Per-catalog `payload_columns` reflects these differences directly — see `docs/references/<catalog>-columns.md` for authoritative per-catalog column lists.
+- **Margin caches:** Gaia DR3 and DES Y6 Gold ship margin caches; DELVE DR3 Gold and SkyMapper DR4 do not (see §7.1 *Margin Caches and Edge Effects* for the table and impact).
+
+For depth on the value-coercion at the publish boundary (numpy/pandas → JSON-native, missing-value handling), see [`docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md`](docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md).
 
 Planned future catalogs:
 
 - **Pan-STARRS1 (PS1)**
 
-Adding a new catalog requires only a new entry in `CROSSMATCH_CATALOGS` and the corresponding `{CATALOG}_HATS_URL` env var. No changes to the core ingestion, queueing, matching logic, or deployment architecture are needed.
+Adding a new catalog requires: a new entry in `CROSSMATCH_CATALOGS` with `name`/`hats_url`/`source_id_column`/`ra_column`/`dec_column`/`payload_columns` (the latter declared in upstream-native case and validated against `docs/references/<catalog>-columns.md`); the corresponding `{CATALOG}_HATS_URL` env var; and a new `docs/references/<catalog>-columns.md` capturing the authoritative column list. No changes to the core ingestion, queueing, matching logic, or deployment architecture are needed.
 
 ### 7.4 Dask Cluster Requirements
 
@@ -1068,7 +1095,7 @@ Database schema changes are managed with Django migrations:
 
 ### 8.4 Celery task definitions
 
-- `tasks.crossmatch.crossmatch_batch(batch_ids: list, match_version: int = 1)` — processes a batch of alert UUIDs through LSDB crossmatch against all configured catalogs (Gaia DR3, DES Y6 Gold).
+- `tasks.crossmatch.crossmatch_batch(batch_ids: list, match_version: int = 1)` — processes a batch of alert UUIDs through LSDB crossmatch against all configured catalogs (see §7.3).
 - `tasks.schedule.dispatch_crossmatch_batch()` — periodic task (every 30s) that checks batch thresholds and dispatches `crossmatch_batch` with the selected alert IDs.
 
 ---
