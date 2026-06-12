@@ -127,7 +127,8 @@ Three independent ingest services consume from separate broker streams and write
 
 **D. Match Notifier Service (runs in our Kubernetes cluster)**
 - Watches PostgreSQL for newly created matches.
-- Sends an update/annotation back to LSST (mechanism TBD).
+- Publishes match payloads over **SCiMMA Hopskotch** (Kafka via `hop-client`) — the live primary output channel. See §4.6 for the published-payload shape, lifecycle, and destination routing.
+- An LSST return channel (§4.5) remains TBD; when added it lands as another backend handler behind the existing destination-routing registry.
 - Records notification attempts and outcomes for retries.
 
 **E. Supporting Infrastructure**
@@ -666,17 +667,14 @@ given alert, with per-broker metadata.
 |---|---|---|
 | id | BIGSERIAL PK | |
 | lsst_diaobject_diaobjectid | BIGINT NOT NULL REFERENCES alerts(lsst_diaobject_diaobjectid) | |
-| broker | TEXT NOT NULL | `'antares'` or `'lasair'` |
-| broker_alert_id | TEXT NULL | broker-specific alert/event id if available |
-| delivered_at | TIMESTAMPTZ NOT NULL DEFAULT now() | time of this delivery |
-| raw_payload | JSONB NULL | broker-specific envelope/annotations (not the LSST payload, which lives in `alerts.payload`) |
+| broker | TEXT NOT NULL | `'antares'`, `'lasair'`, or `'pittgoogle'` |
+| ingest_time | TIMESTAMPTZ NOT NULL DEFAULT now() | recorded by Django `auto_now_add=True` when the delivery row is inserted |
 
 Constraints:
 - `UNIQUE(lsst_diaobject_diaobjectid, broker)` — one record per broker per alert; re-deliveries from the same broker are discarded with `ON CONFLICT DO NOTHING`.
 
 Indexes:
-- `INDEX(broker)`
-- `INDEX(delivered_at)`
+- `INDEX(lsst_diaobject_diaobjectid)` — supports per-alert delivery lookups.
 
 #### 5.2.2 `catalog_matches`
 Stores match outputs for all catalog crossmatches (Gaia, DES, SkyMapper, etc.).
@@ -769,10 +767,11 @@ within milliseconds of each other.
 
 ```sql
 -- Step 2: record the broker delivery (always; idempotent)
-INSERT INTO alert_deliveries (lsst_diaobject_diaobjectid, broker, broker_alert_id, raw_payload)
+INSERT INTO alert_deliveries (lsst_diaobject_diaobjectid, broker)
 VALUES (...)
 ON CONFLICT (lsst_diaobject_diaobjectid, broker) DO NOTHING;
--- Re-deliveries from the same broker are silently discarded
+-- Re-deliveries from the same broker are silently discarded.
+-- ingest_time is set automatically by the Django model's auto_now_add.
 ```
 
 Both steps should be executed in a single database transaction.
@@ -844,24 +843,59 @@ from django.conf import settings
 # Module-level cache: {catalog_name: lsdb_catalog}
 _catalog_cache = {}
 
+# Alert-side column names that would collide with catalog columns under
+# suffix_method='overlapping_columns'. Reject configs that name any of these
+# in payload_columns up front so the publish-side key mapping doesn't silently
+# break later. Keep in sync with the alerts DataFrame built in tasks/crossmatch.py.
+_ALERT_COLUMNS = {'uuid', 'lsst_diaObject_diaObjectId', 'ra_deg', 'dec_deg'}
+
+
+def _load_columns(catalog_config):
+    """source-id + RA + Dec + any configured payload_columns (deduplicated)."""
+    return list(dict.fromkeys([
+        catalog_config['source_id_column'],
+        catalog_config['ra_column'],
+        catalog_config['dec_column'],
+        *catalog_config.get('payload_columns', []),
+    ]))
+
+
 def _get_catalog(catalog_config):
-    name = catalog_config[‘name’]
+    name = catalog_config['name']
     if name not in _catalog_cache:
-        _catalog_cache[name] = lsdb.open_catalog(
-            catalog_config[‘hats_url’],
-            columns=[catalog_config[‘source_id_column’],
-                     catalog_config[‘ra_column’],
-                     catalog_config[‘dec_column’]],
-        )
+        url = catalog_config['hats_url']
+        requested = _load_columns(catalog_config)
+
+        collisions = [c for c in requested if c in _ALERT_COLUMNS]
+        if collisions:
+            raise ValueError(
+                f"{name}: requested columns {collisions} collide with alert "
+                f"columns; the crossmatch would suffix them and break payload "
+                f"key mapping. Rename or drop them from payload_columns."
+            )
+
+        # open_catalog with no `columns` loads only the catalog's *default*
+        # columns, so introspect the full schema with columns="all".
+        available = set(lsdb.open_catalog(url, columns="all").columns)
+        missing = [c for c in requested if c not in available]
+        if missing:
+            raise ValueError(
+                f"{name}: requested columns not found in catalog schema: "
+                f"{missing}. Check name/case against docs/references/"
+                f"{name}-columns.md."
+            )
+
+        _catalog_cache[name] = lsdb.open_catalog(url, columns=requested)
     return _catalog_cache[name]
+
 
 def crossmatch_alerts(alerts_catalog, catalog_config):
     catalog = _get_catalog(catalog_config)
     matches = alerts_catalog.crossmatch(
         catalog, n_neighbors=1,
         radius_arcsec=settings.CROSSMATCH_RADIUS_ARCSEC,
-        suffixes=(‘_alert’, ‘_catalog’),
-        suffix_method=’overlapping_columns’,
+        suffixes=('_alert', '_catalog'),
+        suffix_method='overlapping_columns',
     )
     return matches.compute()
 ```
@@ -1059,13 +1093,13 @@ Dependencies:
 - All components run the same image tag (ensures reproducibility).
 
 #### 9.1.2 Helm chart approach
-We will create a top-level Helm chart `alertmatch` that deploys:
+The Helm chart at `kubernetes/charts/crossmatch-service/` deploys:
 - Our services (ingest, workers, notifier, schedule)
 - Optional dependency charts:
   - `valkey`
   - `postgresql` (dev/test only; prod may use managed Postgres)
 
-Values will define:
+Values define:
 - image repository/tag
 - env vars
 - secrets
