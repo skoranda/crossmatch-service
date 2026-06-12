@@ -1,6 +1,6 @@
-# LSST Alert Matching Service Architecture (ANTARES + Lasair + Pitt-Google + Gaia + DES)
+# LSST Alert Matching Service Architecture (ANTARES + Lasair + Pitt-Google brokers × HATS catalogs)
 
-This document defines a Python-based service architecture that receives Rubin/LSST alerts from the **ANTARES**, **Lasair**, and **Pitt-Google** brokers, matches them against the **Gaia DR3** and **DES Y6 Gold** catalogs using **LSDB**, and records results for eventual **feedback to LSST** (return mechanism TBD).
+This document defines a Python-based service architecture that receives Rubin/LSST alerts from the **ANTARES**, **Lasair**, and **Pitt-Google** brokers, matches them against multiple HATS catalogs using **LSDB** (Gaia DR3, DES Y6 Gold, DELVE DR3 Gold, and SkyMapper DR4 today — see §7.3 for the authoritative roster and asymmetry callout), and records results for eventual **feedback to LSST** (return mechanism TBD).
 
 It is an iteration of the original design, updated to:
 - Use **Celery** for work orchestration
@@ -115,10 +115,10 @@ Three independent ingest services consume from separate broker streams and write
 
 **C. Crossmatch Workers (Celery workers; runs in our Kubernetes cluster; horizontally scaled)**
 - Consume batch crossmatch jobs from Celery.
-- Use LSDB to match alerts against all configured HATS catalogs (currently **Gaia DR3** and **DES Y6 Gold**) via `lsdb.from_dataframe()` + `catalog.crossmatch()`.
+- Use LSDB to match alerts against all configured HATS catalogs via `lsdb.from_dataframe()` + `catalog.crossmatch()`. See §7.3 for the authoritative per-catalog roster.
 - LSDB operates on HATS-formatted (HEALPix-partitioned Parquet) catalogs and uses **Dask** under the hood for parallel, distributed computation. When `DASK_SCHEDULER_ADDRESS` is set, each worker connects to a remote Dask scheduler at startup via `dask.distributed.Client`, offloading computation to dedicated Dask workers. When unset, Dask runs locally within the Celery worker process using the default synchronous scheduler.
-- Catalogs are defined in a configurable registry (`CROSSMATCH_CATALOGS` in Django settings). Each entry specifies the catalog name, HATS URL, source ID column, and RA/Dec column names (which vary per catalog — e.g., lowercase `ra`/`dec` for Gaia, uppercase `RA`/`DEC` for DES).
-- The Gaia DR3 HATS catalog is accessed from the **public S3 bucket** `s3://stpubdata/hats/gaia/dr3/` (no credentials required). The DES Y6 Gold HATS catalog is accessed from `https://data.lsdb.io/hats/des/des_y6_gold`.
+- Catalogs are defined in a configurable registry (`CROSSMATCH_CATALOGS` in Django settings). Each entry specifies the catalog name, HATS URL, source ID column, RA/Dec column names, and `payload_columns` declaring the upstream-native columns to fetch and publish for that catalog (per-catalog config detail in §7.3).
+- Catalog HATS URLs come from per-catalog env vars (e.g., `GAIA_HATS_URL`, `DES_HATS_URL`, `DELVE_HATS_URL`, `SKYMAPPER_HATS_URL`); the Gaia DR3 default points at the public S3 bucket `s3://stpubdata/hats/gaia/dr3/` (no credentials required); the other defaults point at `https://data.lsdb.io/hats/...` mirrors. Authoritative per-catalog details live in §7.3.
 - Each catalog object is cached in a module-level dict (`_catalog_cache`) keyed by catalog name within each worker process (metadata only; lightweight).
 - Alert batches (up to 100k) are converted to an LSDB catalog via `from_dataframe()` with adaptive HEALPix partitioning, then crossmatched sequentially against each configured catalog. LSDB loads only the HATS partitions that overlap the alert positions.
 - Per-catalog error isolation: if crossmatching fails for one catalog, the remaining catalogs are still processed.
@@ -127,7 +127,8 @@ Three independent ingest services consume from separate broker streams and write
 
 **D. Match Notifier Service (runs in our Kubernetes cluster)**
 - Watches PostgreSQL for newly created matches.
-- Sends an update/annotation back to LSST (mechanism TBD).
+- Publishes match payloads over **SCiMMA Hopskotch** (Kafka via `hop-client`) — the live primary output channel. See §4.6 for the published-payload shape, lifecycle, and destination routing.
+- An LSST return channel (§4.5) remains TBD; when added it lands as another backend handler behind the existing destination-routing registry.
 - Records notification attempts and outcomes for retries.
 
 **E. Supporting Infrastructure**
@@ -218,12 +219,12 @@ must be re-issued / re-created to use `>=` for consistency.
    - Celery Beat dispatches batch every 30s when thresholds are met
    - Load batch of QUEUED alerts into pandas DataFrame
    - Convert to LSDB catalog via `from_dataframe()`
-   - Crossmatch sequentially against all configured HATS catalogs (Gaia DR3, DES Y6 Gold)
+   - Crossmatch sequentially against all configured HATS catalogs (see §7.3)
    - Write results to `catalog_matches` (one row per catalog match)
    - Transition all alerts in batch to MATCHED
 6. Notifier service:
    - Detect new match rows
-   - Send an LSST update (TBD)
+   - Publish payloads to **SCiMMA Hopskotch** (the live channel, see §4.6); an LSST return channel remains TBD (§4.5)
    - Track in `notifications`
 
 ### 3.1 Sequence Diagram
@@ -237,16 +238,21 @@ sequenceDiagram
   participant AING as ANTARES Ingest
   participant LAS as Lasair Broker
   participant LING as Lasair Ingest
+  participant PGB as Pitt-Google Pub/Sub
+  participant PGSMT as Pitt-Google SMT UDF Filter
+  participant PGING as Pitt-Google Ingest
   participant PG as PostgreSQL
   participant RED as Valkey (Celery broker)
   participant CEL as Celery
   participant WRK as Crossmatch Workers
-  participant LSDB as LSDB (Gaia, DES)
+  participant LSDB as LSDB (HATS catalogs)
   participant NOT as Match Notifier
+  participant HOP as SCiMMA Hopskotch (Kafka)
   participant LSSTRET as LSST Update Receiver (TBD)
 
   LSST->>ANT: Publish alert packet
   LSST->>LAS: Publish alert packet
+  LSST->>PGB: Publish alert packet
 
   par ANTARES delivery
     ANT->>AFIL: Evaluate alert against ANTARES filter criteria
@@ -267,15 +273,28 @@ sequenceDiagram
       LING->>CEL: Enqueue crossmatch_alert task
       CEL->>RED: Store task message
     end
+  and Pitt-Google delivery
+    PGB->>PGSMT: Evaluate via SMT JavaScript UDF (reliability >= MIN_DIASOURCE_RELIABILITY)
+    alt Passes SMT UDF + attribute filter
+      PGB-->>PGING: Deliver alert via Pub/Sub subscription
+      PGING->>PG: UPSERT alerts (ON CONFLICT DO NOTHING) + INSERT alert_deliveries (broker=pittgoogle)
+      alt New alert (first delivery)
+        PGING->>CEL: Enqueue crossmatch_alert task
+        CEL->>RED: Store task message
+      end
+    else Filtered out
+      PGSMT-->>PGB: Drop server-side at Pub/Sub
+    end
   end
 
   RED-->>WRK: Deliver batch task
   WRK->>PG: Load QUEUED alerts (batch_ids)
-  WRK->>LSDB: from_dataframe() + crossmatch(gaia, des, ...)
-  WRK->>PG: UPSERT catalog_matches + transition to MATCHED
-  NOT->>PG: Watch for new matches
-  NOT->>LSSTRET: Send match update (TBD)
-  NOT->>PG: Record notifications state
+  WRK->>LSDB: from_dataframe() + crossmatch(all configured catalogs)
+  WRK->>PG: UPSERT catalog_matches + Notification(destination=hopskotch) + transition to MATCHED
+  NOT->>PG: Poll pending notifications (dispatch_notifications, every 10s)
+  NOT->>HOP: Publish match payload via hop-client (per §4.6)
+  NOT->>PG: Record notifications state (sent | failed)
+  NOT-->>LSSTRET: Send match update (TBD — same destination-routing registry)
 ```
 
 ---
@@ -557,7 +576,7 @@ with stream.open(url, "w") as producer:
     producer.write(payload)   # plain dict → auto-serialized as JSON
 ```
 
-**Message payload**: Each published message is a flat JSON dict containing the catalog name and source ID (generic across all catalogs):
+**Message payload**: Each published message is a JSON dict with six generic top-level fields plus a catalog-specific `catalog_payload` object. The shape is assembled in `tasks/crossmatch.py` and published verbatim by `notifier/impl_hopskotch.py`. Example for a Gaia DR3 match:
 
 ```json
 {
@@ -566,9 +585,24 @@ with stream.open(url, "w") as producer:
     "dec": 2.456,
     "catalog_name": "gaia_dr3",
     "catalog_source_id": "4567890123456789",
-    "separation_arcsec": 0.42
+    "separation_arcsec": 0.42,
+    "catalog_payload": {
+        "phot_g_mean_mag": 18.34,
+        "phot_bp_mean_mag": 18.71,
+        "phot_rp_mean_mag": 17.82,
+        "parallax": 1.247,
+        "pmra": -3.41,
+        "classprob_dsc_combmod_star": 0.92,
+        "ruwe": 1.08
+    }
 }
 ```
+
+The six top-level fields (`diaObjectId` through `separation_arcsec`) are generic across all catalogs. The `catalog_payload` object is catalog-specific: its keys are the **lowercased upstream-native column names** declared in `settings.CROSSMATCH_CATALOGS[*].payload_columns` for that catalog (see §7.3 for the per-catalog configuration). For example, a DES Y6 Gold match's `catalog_payload` carries `wavg_mag_psf_g`, `bdf_t`, `dnf_z`, etc. (DES's UPPERCASE upstream names lowercased at publish time); a SkyMapper DR4 match's `catalog_payload` carries `u_psf`, `raj2000`, `class_star`, etc. (the J2000 suffix is preserved because the upstream name is already lowercase). Values are coerced to JSON-native scalars at the publish boundary; missing values appear as JSON `null`, and the key set is stable per catalog regardless of per-row nulls.
+
+**Consumer evolution policy**: Consumers must treat unknown `catalog_payload` keys as additive. New catalogs may add keys, and existing catalogs may grow their `payload_columns` without a schema-version bump; the published-payload contract is discriminated by `catalog_name`, not by a version field. The six generic top-level fields are stable.
+
+For full depth on the per-catalog declarative publish contract, see [`docs/solutions/conventions/catalog-specific-payload-columns.md`](docs/solutions/conventions/catalog-specific-payload-columns.md). For depth on the numpy/pandas → JSON-native value coercion at the publish boundary (including `pd.isna` sentinel coverage and the bool-before-int rule), see [`docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md`](docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md).
 
 **Notification lifecycle**:
 1. `crossmatch_batch` creates `Notification` rows (state=`pending`,
@@ -613,6 +647,8 @@ publisher automatically disables authentication when credentials are not set.
 
 ## 5. PostgreSQL Database Design
 
+> For running ad-hoc SQL or inspecting these tables in the dockerized dev environment, see [`docs/solutions/developer-experience/query-dev-database-via-docker-exec.md`](docs/solutions/developer-experience/query-dev-database-via-docker-exec.md) — the dev DB's `5432` port is not host-published, so `psql` runs through `docker compose exec django-db`.
+
 ### 5.1 Conventions
 - `TIMESTAMPTZ` for datetimes.
 - `JSONB` for raw payload storage.
@@ -651,17 +687,14 @@ given alert, with per-broker metadata.
 |---|---|---|
 | id | BIGSERIAL PK | |
 | lsst_diaobject_diaobjectid | BIGINT NOT NULL REFERENCES alerts(lsst_diaobject_diaobjectid) | |
-| broker | TEXT NOT NULL | `'antares'` or `'lasair'` |
-| broker_alert_id | TEXT NULL | broker-specific alert/event id if available |
-| delivered_at | TIMESTAMPTZ NOT NULL DEFAULT now() | time of this delivery |
-| raw_payload | JSONB NULL | broker-specific envelope/annotations (not the LSST payload, which lives in `alerts.payload`) |
+| broker | TEXT NOT NULL | `'antares'`, `'lasair'`, or `'pittgoogle'` |
+| ingest_time | TIMESTAMPTZ NOT NULL DEFAULT now() | recorded by Django `auto_now_add=True` when the delivery row is inserted |
 
 Constraints:
 - `UNIQUE(lsst_diaobject_diaobjectid, broker)` — one record per broker per alert; re-deliveries from the same broker are discarded with `ON CONFLICT DO NOTHING`.
 
 Indexes:
-- `INDEX(broker)`
-- `INDEX(delivered_at)`
+- `INDEX(lsst_diaobject_diaobjectid)` — supports per-alert delivery lookups.
 
 #### 5.2.2 `catalog_matches`
 Stores match outputs for all catalog crossmatches (Gaia, DES, SkyMapper, etc.).
@@ -754,10 +787,11 @@ within milliseconds of each other.
 
 ```sql
 -- Step 2: record the broker delivery (always; idempotent)
-INSERT INTO alert_deliveries (lsst_diaobject_diaobjectid, broker, broker_alert_id, raw_payload)
+INSERT INTO alert_deliveries (lsst_diaobject_diaobjectid, broker)
 VALUES (...)
 ON CONFLICT (lsst_diaobject_diaobjectid, broker) DO NOTHING;
--- Re-deliveries from the same broker are silently discarded
+-- Re-deliveries from the same broker are silently discarded.
+-- ingest_time is set automatically by the Django model's auto_now_add.
 ```
 
 Both steps should be executed in a single database transaction.
@@ -829,24 +863,59 @@ from django.conf import settings
 # Module-level cache: {catalog_name: lsdb_catalog}
 _catalog_cache = {}
 
+# Alert-side column names that would collide with catalog columns under
+# suffix_method='overlapping_columns'. Reject configs that name any of these
+# in payload_columns up front so the publish-side key mapping doesn't silently
+# break later. Keep in sync with the alerts DataFrame built in tasks/crossmatch.py.
+_ALERT_COLUMNS = {'uuid', 'lsst_diaObject_diaObjectId', 'ra_deg', 'dec_deg'}
+
+
+def _load_columns(catalog_config):
+    """source-id + RA + Dec + any configured payload_columns (deduplicated)."""
+    return list(dict.fromkeys([
+        catalog_config['source_id_column'],
+        catalog_config['ra_column'],
+        catalog_config['dec_column'],
+        *catalog_config.get('payload_columns', []),
+    ]))
+
+
 def _get_catalog(catalog_config):
-    name = catalog_config[‘name’]
+    name = catalog_config['name']
     if name not in _catalog_cache:
-        _catalog_cache[name] = lsdb.open_catalog(
-            catalog_config[‘hats_url’],
-            columns=[catalog_config[‘source_id_column’],
-                     catalog_config[‘ra_column’],
-                     catalog_config[‘dec_column’]],
-        )
+        url = catalog_config['hats_url']
+        requested = _load_columns(catalog_config)
+
+        collisions = [c for c in requested if c in _ALERT_COLUMNS]
+        if collisions:
+            raise ValueError(
+                f"{name}: requested columns {collisions} collide with alert "
+                f"columns; the crossmatch would suffix them and break payload "
+                f"key mapping. Rename or drop them from payload_columns."
+            )
+
+        # open_catalog with no `columns` loads only the catalog's *default*
+        # columns, so introspect the full schema with columns="all".
+        available = set(lsdb.open_catalog(url, columns="all").columns)
+        missing = [c for c in requested if c not in available]
+        if missing:
+            raise ValueError(
+                f"{name}: requested columns not found in catalog schema: "
+                f"{missing}. Check name/case against docs/references/"
+                f"{name}-columns.md."
+            )
+
+        _catalog_cache[name] = lsdb.open_catalog(url, columns=requested)
     return _catalog_cache[name]
+
 
 def crossmatch_alerts(alerts_catalog, catalog_config):
     catalog = _get_catalog(catalog_config)
     matches = alerts_catalog.crossmatch(
         catalog, n_neighbors=1,
         radius_arcsec=settings.CROSSMATCH_RADIUS_ARCSEC,
-        suffixes=(‘_alert’, ‘_catalog’),
-        suffix_method=’overlapping_columns’,
+        suffixes=('_alert', '_catalog'),
+        suffix_method='overlapping_columns',
     )
     return matches.compute()
 ```
@@ -893,20 +962,29 @@ The system uses a configurable catalog registry (`CROSSMATCH_CATALOGS` in Django
 - **DELVE DR3 Gold** — accessed from `https://data.lsdb.io/hats/delve/delve_dr3_gold` (source ID: `COADD_OBJECT_ID`, RA/Dec columns: `RA`/`DEC`)
 - **SkyMapper DR4** — accessed from `https://data.lsdb.io/hats/skymapper_dr4/catalog` (source ID: `object_id`, RA/Dec columns: `raj2000`/`dej2000`)
 
-Each catalog entry specifies: `name`, `hats_url`, `source_id_column`, `ra_column`, `dec_column`. RA/Dec column names vary per catalog (e.g., lowercase for Gaia, uppercase for DES/DELVE, J2000 suffix for SkyMapper).
+Each catalog entry specifies: `name`, `hats_url`, `source_id_column`, `ra_column`, `dec_column`, and `payload_columns`. The `payload_columns` list declares the upstream-native column names to fetch from the HATS catalog and publish (lowercased) in each match's `catalog_payload` — it is the single source of truth for what publishes for that catalog. See [`docs/solutions/conventions/catalog-specific-payload-columns.md`](docs/solutions/conventions/catalog-specific-payload-columns.md) for the full convention.
+
+**Catalogs are not symmetric.** Several properties differ per catalog and a reader (or implementer) following the "all configured catalogs" abstraction elsewhere in this doc should expect:
+
+- **Case conventions:** Gaia DR3 and SkyMapper DR4 use lowercase column names upstream; DES Y6 Gold and DELVE DR3 Gold use UPPERCASE. SkyMapper additionally carries the J2000 suffix on its coordinates (`raj2000`/`dej2000`). The case rule is preserved end-to-end: `payload_columns` is declared in upstream-native case, and lowercasing happens only at publish time (so `WAVG_MAG_PSF_G` becomes `wavg_mag_psf_g`, but `raj2000` is preserved).
+- **Footprints:** Each catalog covers a different sky region. When a batch's alert positions miss a catalog's footprint, LSDB raises `RuntimeError("Catalogs do not overlap")` and the task loop logs it and continues — no-overlap is a normal outcome (e.g., DES Y6 Gold yields no matches for alerts outside its southern footprint).
+- **Available columns:** Gaia DR3 carries astrometric columns (parallax, proper motion) that DES/DELVE/SkyMapper lack; DES and DELVE carry shape (`BDF_*`) and photo-z (`DNF_*`) columns Gaia/SkyMapper lack; DELVE drops DES's `Y` band (4 bands instead of 5); SkyMapper DR4 exposes only PSF photometry across `u v g r i z`, no shape or photo-z. Per-catalog `payload_columns` reflects these differences directly — see `docs/references/<catalog>-columns.md` for authoritative per-catalog column lists.
+- **Margin caches:** Gaia DR3 and DES Y6 Gold ship margin caches; DELVE DR3 Gold and SkyMapper DR4 do not (see §7.1 *Margin Caches and Edge Effects* for the table and impact).
+
+For depth on the value-coercion at the publish boundary (numpy/pandas → JSON-native, missing-value handling), see [`docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md`](docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md).
 
 Planned future catalogs:
 
 - **Pan-STARRS1 (PS1)**
 
-Adding a new catalog requires only a new entry in `CROSSMATCH_CATALOGS` and the corresponding `{CATALOG}_HATS_URL` env var. No changes to the core ingestion, queueing, matching logic, or deployment architecture are needed.
+Adding a new catalog requires: a new entry in `CROSSMATCH_CATALOGS` with `name`/`hats_url`/`source_id_column`/`ra_column`/`dec_column`/`payload_columns` (the latter declared in upstream-native case and validated against `docs/references/<catalog>-columns.md`); the corresponding `{CATALOG}_HATS_URL` env var; and a new `docs/references/<catalog>-columns.md` capturing the authoritative column list. No changes to the core ingestion, queueing, matching logic, or deployment architecture are needed.
 
 ### 7.4 Dask Cluster Requirements
 
 When using a remote Dask scheduler (via `DASK_SCHEDULER_ADDRESS`), both the **scheduler and workers** must have the same Python packages installed as the crossmatch-service. Dask uses pickle serialization to transfer task graphs between the client (Celery worker), scheduler, and Dask workers. If any component is missing a required module, deserialization fails with `ModuleNotFoundError`.
 
 **Required packages on Dask scheduler and workers:**
-- `lsdb` (and its transitive dependencies: `nested_pandas`, `hats`, `mocpy`, etc.)
+- `lsdb` (and its transitive dependencies: `nested_pandas`, `hats`, `mocpy`, etc.) — currently pinned at `lsdb==0.9.0` in `crossmatch/requirements.base.txt`; bumping LSDB or any cluster-aligned pin requires updating every pin site atomically and re-deploying the cluster image. See [`docs/solutions/conventions/dependency-pin-upgrade-pattern-2026-05-12.md`](docs/solutions/conventions/dependency-pin-upgrade-pattern-2026-05-12.md) for the multi-site pin convention.
 - `numpy`, `pandas` — pinned to the same versions as the crossmatch-service
 - `s3fs` — for reading HATS catalogs from S3
 - Python version must match (currently 3.12)
@@ -971,33 +1049,42 @@ crossmatch/
       commands/
         __init__.py
         initialize_periodic_tasks.py
+        locked_init.py
         run_antares_ingest.py
-        run_lasair_ingest.py   # Lasair Kafka consumer loop (planned)
-        run_notifier.py
+        run_lasair_ingest.py
+        run_pittgoogle_ingest.py
   core/
     __init__.py
-    apps.py              # Django AppConfig (to be created)
-    models.py            # Django models for alerts/matches/pointings/notifications
+    apps.py              # Django AppConfig
+    log.py               # structlog get_logger() factory
+    dask.py              # version-drift check + per-fork Client construction (§7.4)
+    models.py            # Django models for alerts/matches/notifications
     migrations/
-  brokers/               # TARGET LAYOUT — current code has antares/ at top level pending this refactor
+  brokers/
     __init__.py
     normalize.py         # shared LSST field extraction (ra, dec, diaObjectId, ...)
     antares/
       __init__.py
-      ingest.py          # ANTARES StreamingClient runner (invoked via management command)
-      normalize.py       # ANTARES-specific annotation handling
+      consumer.py        # ANTARES StreamingClient runner (invoked via run_antares_ingest)
+      publisher.py
     lasair/
       __init__.py
-      ingest.py          # lasair_consumer runner (invoked via management command)
-      normalize.py       # Lasair-specific annotation handling
+      consumer.py        # lasair_consumer runner (invoked via run_lasair_ingest)
+    pittgoogle/
+      __init__.py
+      consumer.py        # pittgoogle.pubsub.Consumer runner (invoked via run_pittgoogle_ingest)
+      tests.py
   matching/
     __init__.py
-    catalog.py
+    catalog.py           # _get_catalog, _load_columns, crossmatch_alerts (§7.1)
+    payload.py           # build_catalog_payload, _to_json_scalar (§4.6)
   notifier/
     __init__.py
-    watch.py
-    lsst_return.py
+    dispatch.py          # periodic dispatch_notifications + destination-routing registry (§4.6)
+    impl_hopskotch.py    # Hopskotch backend handler (§4.6)
     impl_http.py
+    lsst_return.py
+    watch.py
   tasks/
     __init__.py
     crossmatch.py
@@ -1009,9 +1096,9 @@ We will run the long-lived processes as Django management commands (so they shar
 
 - **ANTARES ingest service**: `python manage.py run_antares_ingest`
 - **Lasair ingest service**: `python manage.py run_lasair_ingest`
+- **Pitt-Google ingest service**: `python manage.py run_pittgoogle_ingest`
 - **Celery worker(s)** (crossmatch): `celery -A project worker -Q crossmatch -l INFO`
-- **Celery beat**: `celery -A project beat` (dispatches crossmatch batches every 30s)
-- **Notifier**: `python manage.py run_notifier`
+- **Celery beat**: `celery -A project beat` — dispatches the periodic `crossmatch_batch` and `dispatch_notifications` tasks (see §4.6 for the notifier dispatch lifecycle; the notifier does not run as a separate long-lived process).
 
 Database schema changes are managed with Django migrations:
 - `python manage.py makemigrations`
@@ -1019,7 +1106,7 @@ Database schema changes are managed with Django migrations:
 
 ### 8.4 Celery task definitions
 
-- `tasks.crossmatch.crossmatch_batch(batch_ids: list, match_version: int = 1)` — processes a batch of alert UUIDs through LSDB crossmatch against all configured catalogs (Gaia DR3, DES Y6 Gold).
+- `tasks.crossmatch.crossmatch_batch(batch_ids: list, match_version: int = 1)` — processes a batch of alert UUIDs through LSDB crossmatch against all configured catalogs (see §7.3).
 - `tasks.schedule.dispatch_crossmatch_batch()` — periodic task (every 30s) that checks batch thresholds and dispatches `crossmatch_batch` with the selected alert IDs.
 
 ---
@@ -1027,6 +1114,8 @@ Database schema changes are managed with Django migrations:
 ## 9. Deployment
 
 ### 9.1 Kubernetes
+
+**Deployment model (k8s GitOps).** Cluster deployment is driven from a separate GitLab repo, `crossmatch-service-k8s-gitops`, which holds the Helm values overlay (image tag pin, env-var bindings, secret references). This repo publishes container images to the **public GitLab Container Registry** via `.github/workflows/build-image.yml` on semver release tags; the cluster pulls the image anonymously (no pull secret required). The env-var surface between this service and the gitops overlay is enforced by a **deploy env-var contract guardrail** at `deploy-contract.yaml` in this repo, so a service-side env-var rename or removal must be reflected in the gitops overlay before the next deploy. Authoritative implementation details — registry choice rationale, sealed-secret arrangement, Helm overlay shape, rollout procedure — live in the gitops repo and the implementation plan at `docs/plans/2026-06-02-001-feat-crossmatch-service-k8s-gitops-plan.md`.
 
 Deployments (recommended):
 - `ingest` Deployment (1–N replicas; ANTARES Kafka consumer)
@@ -1044,13 +1133,13 @@ Dependencies:
 - All components run the same image tag (ensures reproducibility).
 
 #### 9.1.2 Helm chart approach
-We will create a top-level Helm chart `alertmatch` that deploys:
+The Helm chart at `kubernetes/charts/crossmatch-service/` deploys:
 - Our services (ingest, workers, notifier, schedule)
 - Optional dependency charts:
   - `valkey`
   - `postgresql` (dev/test only; prod may use managed Postgres)
 
-Values will define:
+Values define:
 - image repository/tag
 - env vars
 - secrets
@@ -1059,23 +1148,58 @@ Values will define:
 - node affinity/tolerations (if LSDB needs larger nodes)
 
 #### 9.1.3 Configuration & secrets
-Environment variables (examples):
-- `DATABASE_URL=postgresql+psycopg://user:pass@postgres:5432/alertmatch`
+
+The env-var surface below is the contract documented in `deploy-contract.yaml` and consumed by the gitops Helm overlay (see §9.1 *Deployment model*). Topical context for each variable lives in the section that introduces it; this catalog cross-references rather than duplicates.
+
+Environment variables:
+
+**Database & queue**
+- `DATABASE_URL=postgresql+psycopg://user:pass@postgres:5432/scimma_crossmatch_service`
 - `CELERY_BROKER_URL=redis://valkey:6379/0`
 - `CELERY_RESULT_BACKEND=redis://valkey:6379/1` (optional)
-- `ANTARES_TOPIC=...`
-- `GAIA_HATS_URL=s3://stpubdata/gaia/gaia_dr3/public/hats`
-- `DES_HATS_URL=https://data.lsdb.io/hats/des/des_y6_gold`
-- `CROSSMATCH_RADIUS_ARCSEC=1.0`
-- `DASK_SCHEDULER_ADDRESS=tcp://<host>:<port>` (optional; when unset, Dask runs locally)
-- `DASK_VERSION_CHECK_TIMEOUT_SECONDS=300` (default 300s; max wait at startup for cluster + ≥1 worker before the version-drift check fails)
+
+**Broker filter standard** (see §2.2)
+- `MIN_DIASOURCE_RELIABILITY=0.6` — broker-agnostic threshold; consumed by every broker client in this repo
+
+**ANTARES broker** (see §4.1)
+- `ANTARES_API_KEY`, `ANTARES_API_SECRET` — SASL credentials
+- `ANTARES_TOPIC=lsst_scimma_quality_transient`
+- `ANTARES_GROUP_ID=scimma-crossmatch-prod`
+
+**Lasair broker** (see §4.3)
 - `LASAIR_KAFKA_SERVER=lasair-lsst-kafka.lsst.ac.uk:9092`
 - `LASAIR_TOPIC=lasair_<uid>_<filter-name>`
 - `LASAIR_GROUP_ID=scimma-crossmatch-prod`
+- `LASAIR_TOKEN=<api-token>` (REST API; not used by the Kafka consumer)
+
+**Pitt-Google broker** (see §4.4)
+- `PITTGOOGLE_TOPIC=lsst-alerts-json` — topic in Pitt-Google's project
+- `PITTGOOGLE_SUBSCRIPTION=<subscription-name>` — subscription in our GCP project
+- `PITTGOOGLE_PUBLISHER_PROJECT=pitt-alert-broker` — Pitt-Google's GCP project ID
+- `GOOGLE_CLOUD_PROJECT=<our-gcp-project-id>` — our subscriber project ID
+- `GOOGLE_APPLICATION_CREDENTIALS=/var/run/secrets/gcp/key.json` — path to service account key file
+
+**Hopskotch publishing** (see §4.6)
+- `HOPSKOTCH_BROKER_URL=kafka://kafka.scimma.org`
+- `HOPSKOTCH_TOPIC=crossmatch-results`
+- `HOPSKOTCH_USERNAME`, `HOPSKOTCH_PASSWORD` — SASL credentials
+
+**Crossmatch catalogs** (see §7.3)
+- `GAIA_HATS_URL=s3://stpubdata/gaia/gaia_dr3/public/hats`
+- `DES_HATS_URL=https://data.lsdb.io/hats/des/des_y6_gold`
+- `DELVE_HATS_URL=https://data.lsdb.io/hats/delve/delve_dr3_gold`
+- `SKYMAPPER_HATS_URL=https://data.lsdb.io/hats/skymapper_dr4/catalog`
+- `CROSSMATCH_RADIUS_ARCSEC=1.0`
+
+**Dask cluster** (see §7.4)
+- `DASK_SCHEDULER_ADDRESS=tcp://<host>:<port>` (optional; when unset, Dask runs locally)
+- `DASK_VERSION_CHECK_TIMEOUT_SECONDS=300` (default 300s; max wait at startup for cluster + ≥1 worker before the version-drift check fails)
 
 Secrets:
 - DB password
-- ANTARES credentials
+- ANTARES credentials (`ANTARES_API_KEY`, `ANTARES_API_SECRET`)
+- Pitt-Google service account key file (`GOOGLE_APPLICATION_CREDENTIALS`)
+- Hopskotch SASL credentials (`HOPSKOTCH_USERNAME`, `HOPSKOTCH_PASSWORD`)
 - LSST return credentials (future)
 
 #### 9.1.4 Health checks
