@@ -557,7 +557,7 @@ with stream.open(url, "w") as producer:
     producer.write(payload)   # plain dict → auto-serialized as JSON
 ```
 
-**Message payload**: Each published message is a flat JSON dict containing the catalog name and source ID (generic across all catalogs):
+**Message payload**: Each published message is a JSON dict with six generic top-level fields plus a catalog-specific `catalog_payload` object. The shape is assembled in `tasks/crossmatch.py` and published verbatim by `notifier/impl_hopskotch.py`. Example for a Gaia DR3 match:
 
 ```json
 {
@@ -566,9 +566,24 @@ with stream.open(url, "w") as producer:
     "dec": 2.456,
     "catalog_name": "gaia_dr3",
     "catalog_source_id": "4567890123456789",
-    "separation_arcsec": 0.42
+    "separation_arcsec": 0.42,
+    "catalog_payload": {
+        "phot_g_mean_mag": 18.34,
+        "phot_bp_mean_mag": 18.71,
+        "phot_rp_mean_mag": 17.82,
+        "parallax": 1.247,
+        "pmra": -3.41,
+        "classprob_dsc_combmod_star": 0.92,
+        "ruwe": 1.08
+    }
 }
 ```
+
+The six top-level fields (`diaObjectId` through `separation_arcsec`) are generic across all catalogs. The `catalog_payload` object is catalog-specific: its keys are the **lowercased upstream-native column names** declared in `settings.CROSSMATCH_CATALOGS[*].payload_columns` for that catalog (see §7.3 for the per-catalog configuration). For example, a DES Y6 Gold match's `catalog_payload` carries `wavg_mag_psf_g`, `bdf_t`, `dnf_z`, etc. (DES's UPPERCASE upstream names lowercased at publish time); a SkyMapper DR4 match's `catalog_payload` carries `u_psf`, `raj2000`, `class_star`, etc. (the J2000 suffix is preserved because the upstream name is already lowercase). Values are coerced to JSON-native scalars at the publish boundary; missing values appear as JSON `null`, and the key set is stable per catalog regardless of per-row nulls.
+
+**Consumer evolution policy**: Consumers must treat unknown `catalog_payload` keys as additive. New catalogs may add keys, and existing catalogs may grow their `payload_columns` without a schema-version bump; the published-payload contract is discriminated by `catalog_name`, not by a version field. The six generic top-level fields are stable.
+
+For full depth on the per-catalog declarative publish contract, see [`docs/solutions/conventions/catalog-specific-payload-columns.md`](docs/solutions/conventions/catalog-specific-payload-columns.md). For depth on the numpy/pandas → JSON-native value coercion at the publish boundary (including `pd.isna` sentinel coverage and the bool-before-int rule), see [`docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md`](docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md).
 
 **Notification lifecycle**:
 1. `crossmatch_batch` creates `Notification` rows (state=`pending`,
