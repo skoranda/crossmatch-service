@@ -1047,33 +1047,42 @@ crossmatch/
       commands/
         __init__.py
         initialize_periodic_tasks.py
+        locked_init.py
         run_antares_ingest.py
-        run_lasair_ingest.py   # Lasair Kafka consumer loop (planned)
-        run_notifier.py
+        run_lasair_ingest.py
+        run_pittgoogle_ingest.py
   core/
     __init__.py
-    apps.py              # Django AppConfig (to be created)
-    models.py            # Django models for alerts/matches/pointings/notifications
+    apps.py              # Django AppConfig
+    log.py               # structlog get_logger() factory
+    dask.py              # version-drift check + per-fork Client construction (§7.4)
+    models.py            # Django models for alerts/matches/notifications
     migrations/
-  brokers/               # TARGET LAYOUT — current code has antares/ at top level pending this refactor
+  brokers/
     __init__.py
     normalize.py         # shared LSST field extraction (ra, dec, diaObjectId, ...)
     antares/
       __init__.py
-      ingest.py          # ANTARES StreamingClient runner (invoked via management command)
-      normalize.py       # ANTARES-specific annotation handling
+      consumer.py        # ANTARES StreamingClient runner (invoked via run_antares_ingest)
+      publisher.py
     lasair/
       __init__.py
-      ingest.py          # lasair_consumer runner (invoked via management command)
-      normalize.py       # Lasair-specific annotation handling
+      consumer.py        # lasair_consumer runner (invoked via run_lasair_ingest)
+    pittgoogle/
+      __init__.py
+      consumer.py        # pittgoogle.pubsub.Consumer runner (invoked via run_pittgoogle_ingest)
+      tests.py
   matching/
     __init__.py
-    catalog.py
+    catalog.py           # _get_catalog, _load_columns, crossmatch_alerts (§7.1)
+    payload.py           # build_catalog_payload, _to_json_scalar (§4.6)
   notifier/
     __init__.py
-    watch.py
-    lsst_return.py
+    dispatch.py          # periodic dispatch_notifications + destination-routing registry (§4.6)
+    impl_hopskotch.py    # Hopskotch backend handler (§4.6)
     impl_http.py
+    lsst_return.py
+    watch.py
   tasks/
     __init__.py
     crossmatch.py
@@ -1085,9 +1094,9 @@ We will run the long-lived processes as Django management commands (so they shar
 
 - **ANTARES ingest service**: `python manage.py run_antares_ingest`
 - **Lasair ingest service**: `python manage.py run_lasair_ingest`
+- **Pitt-Google ingest service**: `python manage.py run_pittgoogle_ingest`
 - **Celery worker(s)** (crossmatch): `celery -A project worker -Q crossmatch -l INFO`
-- **Celery beat**: `celery -A project beat` (dispatches crossmatch batches every 30s)
-- **Notifier**: `python manage.py run_notifier`
+- **Celery beat**: `celery -A project beat` — dispatches the periodic `crossmatch_batch` and `dispatch_notifications` tasks (see §4.6 for the notifier dispatch lifecycle; the notifier does not run as a separate long-lived process).
 
 Database schema changes are managed with Django migrations:
 - `python manage.py makemigrations`
