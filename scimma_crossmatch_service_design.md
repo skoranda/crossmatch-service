@@ -294,7 +294,7 @@ sequenceDiagram
   NOT->>PG: Poll pending notifications (dispatch_notifications, every 10s)
   NOT->>HOP: Publish match payload via hop-client (per §4.6)
   NOT->>PG: Record notifications state (sent | failed)
-  NOT-->>LSSTRET: Send match update (TBD; same destination-routing registry)
+  NOT-->>LSSTRET: Send match update (TBD — same destination-routing registry)
 ```
 
 ---
