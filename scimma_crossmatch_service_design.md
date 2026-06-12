@@ -647,6 +647,8 @@ publisher automatically disables authentication when credentials are not set.
 
 ## 5. PostgreSQL Database Design
 
+> For running ad-hoc SQL or inspecting these tables in the dockerized dev environment, see [`docs/solutions/developer-experience/query-dev-database-via-docker-exec.md`](docs/solutions/developer-experience/query-dev-database-via-docker-exec.md) — the dev DB's `5432` port is not host-published, so `psql` runs through `docker compose exec django-db`.
+
 ### 5.1 Conventions
 - `TIMESTAMPTZ` for datetimes.
 - `JSONB` for raw payload storage.
@@ -982,7 +984,7 @@ Adding a new catalog requires: a new entry in `CROSSMATCH_CATALOGS` with `name`/
 When using a remote Dask scheduler (via `DASK_SCHEDULER_ADDRESS`), both the **scheduler and workers** must have the same Python packages installed as the crossmatch-service. Dask uses pickle serialization to transfer task graphs between the client (Celery worker), scheduler, and Dask workers. If any component is missing a required module, deserialization fails with `ModuleNotFoundError`.
 
 **Required packages on Dask scheduler and workers:**
-- `lsdb` (and its transitive dependencies: `nested_pandas`, `hats`, `mocpy`, etc.)
+- `lsdb` (and its transitive dependencies: `nested_pandas`, `hats`, `mocpy`, etc.) — currently pinned at `lsdb==0.9.0` in `crossmatch/requirements.base.txt`; bumping LSDB or any cluster-aligned pin requires updating every pin site atomically and re-deploying the cluster image. See [`docs/solutions/conventions/dependency-pin-upgrade-pattern-2026-05-12.md`](docs/solutions/conventions/dependency-pin-upgrade-pattern-2026-05-12.md) for the multi-site pin convention.
 - `numpy`, `pandas` — pinned to the same versions as the crossmatch-service
 - `s3fs` — for reading HATS catalogs from S3
 - Python version must match (currently 3.12)
@@ -1113,6 +1115,8 @@ Database schema changes are managed with Django migrations:
 
 ### 9.1 Kubernetes
 
+**Deployment model (k8s GitOps).** Cluster deployment is driven from a separate GitLab repo, `crossmatch-service-k8s-gitops`, which holds the Helm values overlay (image tag pin, env-var bindings, secret references). This repo publishes container images to the **public GitLab Container Registry** via `.github/workflows/build-image.yml` on semver release tags; the cluster pulls the image anonymously (no pull secret required). The env-var surface between this service and the gitops overlay is enforced by a **deploy env-var contract guardrail** at `deploy-contract.yaml` in this repo, so a service-side env-var rename or removal must be reflected in the gitops overlay before the next deploy. Authoritative implementation details — registry choice rationale, sealed-secret arrangement, Helm overlay shape, rollout procedure — live in the gitops repo and the implementation plan at `docs/plans/2026-06-02-001-feat-crossmatch-service-k8s-gitops-plan.md`.
+
 Deployments (recommended):
 - `ingest` Deployment (1–N replicas; ANTARES Kafka consumer)
 - `lasair-ingest` Deployment (1 replica; Lasair Kafka consumer)
@@ -1144,23 +1148,58 @@ Values define:
 - node affinity/tolerations (if LSDB needs larger nodes)
 
 #### 9.1.3 Configuration & secrets
-Environment variables (examples):
-- `DATABASE_URL=postgresql+psycopg://user:pass@postgres:5432/alertmatch`
+
+The env-var surface below is the contract documented in `deploy-contract.yaml` and consumed by the gitops Helm overlay (see §9.1 *Deployment model*). Topical context for each variable lives in the section that introduces it; this catalog cross-references rather than duplicates.
+
+Environment variables:
+
+**Database & queue**
+- `DATABASE_URL=postgresql+psycopg://user:pass@postgres:5432/scimma_crossmatch_service`
 - `CELERY_BROKER_URL=redis://valkey:6379/0`
 - `CELERY_RESULT_BACKEND=redis://valkey:6379/1` (optional)
-- `ANTARES_TOPIC=...`
-- `GAIA_HATS_URL=s3://stpubdata/gaia/gaia_dr3/public/hats`
-- `DES_HATS_URL=https://data.lsdb.io/hats/des/des_y6_gold`
-- `CROSSMATCH_RADIUS_ARCSEC=1.0`
-- `DASK_SCHEDULER_ADDRESS=tcp://<host>:<port>` (optional; when unset, Dask runs locally)
-- `DASK_VERSION_CHECK_TIMEOUT_SECONDS=300` (default 300s; max wait at startup for cluster + ≥1 worker before the version-drift check fails)
+
+**Broker filter standard** (see §2.2)
+- `MIN_DIASOURCE_RELIABILITY=0.6` — broker-agnostic threshold; consumed by every broker client in this repo
+
+**ANTARES broker** (see §4.1)
+- `ANTARES_API_KEY`, `ANTARES_API_SECRET` — SASL credentials
+- `ANTARES_TOPIC=lsst_scimma_quality_transient`
+- `ANTARES_GROUP_ID=scimma-crossmatch-prod`
+
+**Lasair broker** (see §4.3)
 - `LASAIR_KAFKA_SERVER=lasair-lsst-kafka.lsst.ac.uk:9092`
 - `LASAIR_TOPIC=lasair_<uid>_<filter-name>`
 - `LASAIR_GROUP_ID=scimma-crossmatch-prod`
+- `LASAIR_TOKEN=<api-token>` (REST API; not used by the Kafka consumer)
+
+**Pitt-Google broker** (see §4.4)
+- `PITTGOOGLE_TOPIC=lsst-alerts-json` — topic in Pitt-Google's project
+- `PITTGOOGLE_SUBSCRIPTION=<subscription-name>` — subscription in our GCP project
+- `PITTGOOGLE_PUBLISHER_PROJECT=pitt-alert-broker` — Pitt-Google's GCP project ID
+- `GOOGLE_CLOUD_PROJECT=<our-gcp-project-id>` — our subscriber project ID
+- `GOOGLE_APPLICATION_CREDENTIALS=/var/run/secrets/gcp/key.json` — path to service account key file
+
+**Hopskotch publishing** (see §4.6)
+- `HOPSKOTCH_BROKER_URL=kafka://kafka.scimma.org`
+- `HOPSKOTCH_TOPIC=crossmatch-results`
+- `HOPSKOTCH_USERNAME`, `HOPSKOTCH_PASSWORD` — SASL credentials
+
+**Crossmatch catalogs** (see §7.3)
+- `GAIA_HATS_URL=s3://stpubdata/gaia/gaia_dr3/public/hats`
+- `DES_HATS_URL=https://data.lsdb.io/hats/des/des_y6_gold`
+- `DELVE_HATS_URL=https://data.lsdb.io/hats/delve/delve_dr3_gold`
+- `SKYMAPPER_HATS_URL=https://data.lsdb.io/hats/skymapper_dr4/catalog`
+- `CROSSMATCH_RADIUS_ARCSEC=1.0`
+
+**Dask cluster** (see §7.4)
+- `DASK_SCHEDULER_ADDRESS=tcp://<host>:<port>` (optional; when unset, Dask runs locally)
+- `DASK_VERSION_CHECK_TIMEOUT_SECONDS=300` (default 300s; max wait at startup for cluster + ≥1 worker before the version-drift check fails)
 
 Secrets:
 - DB password
-- ANTARES credentials
+- ANTARES credentials (`ANTARES_API_KEY`, `ANTARES_API_SECRET`)
+- Pitt-Google service account key file (`GOOGLE_APPLICATION_CREDENTIALS`)
+- Hopskotch SASL credentials (`HOPSKOTCH_USERNAME`, `HOPSKOTCH_PASSWORD`)
 - LSST return credentials (future)
 
 #### 9.1.4 Health checks
