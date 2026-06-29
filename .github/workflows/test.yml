@@ -1,0 +1,72 @@
+name: Tests
+
+# Runs the pytest suite on every PR and on pushes to main, and blocks merge on
+# failure (make this a required check in branch protection — a repo-settings
+# step outside this file).
+#
+# The suite needs Postgres (the dispatch/ordering tests use
+# transaction=True + select_for_update, which SQLite cannot honor) and the heavy
+# lsdb/dask/hats dependency tree. Rather than reinstall that tree on the runner,
+# we build the application image (which installs the pinned requirements.lock)
+# and run pytest inside it against a Postgres service container. Only the
+# lightweight test deps (requirements.dev.txt) are added at run time.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Match crossmatch/project/settings.py DATABASES['default'] defaults.
+          # The service user is a superuser in its container, so it can CREATE
+          # the test database pytest-django needs.
+          POSTGRES_DB: scimma_crossmatch_service
+          POSTGRES_USER: crossmatch_service_admin
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crossmatch_service_admin"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the application image
+        uses: docker/build-push-action@v6
+        with:
+          # Same context/file as docker/docker-compose.yaml and build-image.yml.
+          context: crossmatch
+          file: docker/Dockerfile
+          load: true
+          tags: crossmatch-service:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run pytest
+        run: |
+          docker run --rm --network host \
+            -e DATABASE_HOST=127.0.0.1 \
+            -e DATABASE_PORT=5432 \
+            -e DATABASE_DB=scimma_crossmatch_service \
+            -e DATABASE_USER=crossmatch_service_admin \
+            -e DATABASE_PASSWORD=password \
+            crossmatch-service:ci \
+            sh -c 'cd /opt/crossmatch && pip install --no-cache-dir -r requirements.dev.txt && python -m pytest'

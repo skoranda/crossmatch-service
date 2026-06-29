@@ -73,3 +73,12 @@ Run a subset with a path or `-k`, e.g. `python -m pytest tests/test_dispatch_not
 Tests that depend on commit semantics (the dispatch/ordering tests) use
 `@pytest.mark.django_db(transaction=True)` and require Postgres — they will not
 behave on SQLite.
+
+## Continuous integration
+
+The `Tests` GitHub Actions workflow (`.github/workflows/test.yml`) runs the
+suite on every pull request and on pushes to `main`. It builds the application
+image (so the suite runs against the same pinned dependency tree that ships) and
+runs `pytest` inside it against a Postgres service. Make it a required status
+check in branch protection so a failing test blocks merge (a repo-settings step,
+not in this repo).
