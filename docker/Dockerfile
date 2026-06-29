@@ -1,6 +1,10 @@
 FROM python:3.12.12 AS deps
 
-COPY ./requirements.base.txt /requirements.txt
+# Install from the fully-pinned lock (compiled from requirements.base.txt by
+# pip-compile) so the image's transitive dependency set is reproducible — this
+# is what guarantees hats==0.9.0 et al. across rebuilds. Regenerate the lock
+# with: pip-compile --strip-extras --output-file=requirements.lock requirements.base.txt
+COPY ./requirements.lock /requirements.txt
 RUN pip install -r /requirements.txt --no-cache-dir
 
 FROM python:3.12.12

@@ -1,0 +1,61 @@
+name: Lock drift check
+
+# Fails when requirements.lock is out of sync with requirements.base.txt.
+#
+# requirements.lock is the single source of truth for the image build
+# (docker/Dockerfile installs from it) and pins the full transitive tree —
+# notably hats==0.9.0, which lsdb 0.9.0 requires but whose loose upstream
+# constraint would otherwise let pip pull an incompatible 0.9.1/0.9.2.
+#
+# pip-compile (without --upgrade) honors the versions already pinned in the
+# committed lock, so a recompile only changes the file when someone edited
+# requirements.base.txt without regenerating the lock. That edited-but-stale
+# case is exactly what this check catches.
+
+on:
+  pull_request:
+    paths:
+      - "crossmatch/requirements.base.txt"
+      - "crossmatch/requirements.lock"
+      - ".github/workflows/lock-drift.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "crossmatch/requirements.base.txt"
+      - "crossmatch/requirements.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  lock-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Match docker/Dockerfile (python:3.12.12); resolution markers and
+          # wheel availability are Python-version sensitive.
+          python-version: "3.12"
+
+      - name: Install pip-tools
+        run: pip install pip-tools
+
+      - name: Recompile the lock
+        working-directory: crossmatch
+        run: |
+          pip-compile --quiet --strip-extras \
+            --output-file=requirements.lock requirements.base.txt
+
+      - name: Fail if the lock changed
+        working-directory: crossmatch
+        run: |
+          if ! git diff --exit-code requirements.lock; then
+            echo "::error::requirements.lock is stale. Regenerate it with:"
+            echo "::error::  cd crossmatch && pip-compile --strip-extras --output-file=requirements.lock requirements.base.txt"
+            exit 1
+          fi
