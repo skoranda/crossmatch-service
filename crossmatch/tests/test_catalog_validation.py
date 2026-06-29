@@ -1,6 +1,7 @@
 """R7: _get_catalog validates requested columns up front — a column colliding
 with an alert column, or one missing from the catalog schema, fails loud with a
 clear ValueError instead of a cryptic error deep in .compute()."""
+
 from unittest.mock import MagicMock
 
 import pytest

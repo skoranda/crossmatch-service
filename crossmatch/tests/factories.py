@@ -4,6 +4,7 @@ The Alert FKs on CatalogMatch / Notification use ``to_field='lsst_diaObject_diaO
 (not the uuid pk); SubFactory wiring below resolves that relation correctly so tests build
 graphs the same way production does.
 """
+
 import factory
 from django.utils import timezone
 from factory.django import DjangoModelFactory

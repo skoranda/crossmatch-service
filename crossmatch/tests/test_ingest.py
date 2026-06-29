@@ -1,5 +1,6 @@
 """R8 / AE3: ingest_alert is idempotent per broker — a repeat delivery from the
 same broker creates no duplicate, while a second broker records its own delivery."""
+
 import pytest
 from django.utils import timezone
 

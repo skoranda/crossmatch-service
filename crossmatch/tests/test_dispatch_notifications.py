@@ -1,6 +1,7 @@
 """R4 / AE1: dispatch_notifications advances MATCHED -> NOTIFIED iff all of an
 alert's notifications are sent. Also guards the pk-vs-natural-key regression — the
 transition must filter by lsst_diaObject_diaObjectId, not the uuid pk."""
+
 import pytest
 from django.utils import timezone
 

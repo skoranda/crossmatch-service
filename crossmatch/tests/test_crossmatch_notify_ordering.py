@@ -6,6 +6,7 @@ default rollback would collapse the commit boundary this guards.
 The Dask/LSDB path is mocked at its two seams (lsdb.from_dataframe and
 crossmatch_alerts); a one-row result drives one match + one notification.
 """
+
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -43,7 +44,9 @@ def _send_ok(notifications):
 @override_settings(CROSSMATCH_CATALOGS=TEST_CATALOGS)
 def test_single_match_alert_commits_atomically_and_reaches_notified(monkeypatch):
     alert = AlertFactory(status=Alert.Status.QUEUED)
-    monkeypatch.setattr(crossmatch_mod.lsdb, "from_dataframe", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        crossmatch_mod.lsdb, "from_dataframe", lambda *a, **k: MagicMock()
+    )
     result = pd.DataFrame(
         [
             {
@@ -63,7 +66,12 @@ def test_single_match_alert_commits_atomically_and_reaches_notified(monkeypatch)
     alert.refresh_from_db()
     assert alert.status == Alert.Status.MATCHED
     assert CatalogMatch.objects.filter(alert=alert).count() == 1
-    assert Notification.objects.filter(alert=alert, state=Notification.State.PENDING).count() == 1
+    assert (
+        Notification.objects.filter(
+            alert=alert, state=Notification.State.PENDING
+        ).count()
+        == 1
+    )
     # R5 invariant: a notification is never committed while its alert is still QUEUED.
     assert Notification.objects.filter(alert__status=Alert.Status.QUEUED).count() == 0
 

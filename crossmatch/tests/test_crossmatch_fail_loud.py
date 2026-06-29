@@ -1,6 +1,7 @@
 """R12 / AE4: a catalog open/compute error surfaces (batch reverts to INGESTED)
 instead of being swallowed into a silent zero-match. "No spatial overlap" and an
 empty result stay normal skips (alert completes as MATCHED with no matches)."""
+
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -26,7 +27,9 @@ TEST_CATALOGS = [
 
 @pytest.fixture(autouse=True)
 def _mock_lsdb(monkeypatch):
-    monkeypatch.setattr(crossmatch_mod.lsdb, "from_dataframe", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(
+        crossmatch_mod.lsdb, "from_dataframe", lambda *a, **k: MagicMock()
+    )
 
 
 @pytest.mark.django_db
@@ -34,7 +37,9 @@ def _mock_lsdb(monkeypatch):
 def test_catalog_open_error_fails_loud(monkeypatch):
     # Covers AE4. A raising catalog seam must not silently zero-match.
     def _boom(*a, **k):
-        raise RuntimeError("HealpixDataset.__init__() got an unexpected keyword argument")
+        raise RuntimeError(
+            "HealpixDataset.__init__() got an unexpected keyword argument"
+        )
 
     monkeypatch.setattr(crossmatch_mod, "crossmatch_alerts", _boom)
     alert = AlertFactory(status=Alert.Status.QUEUED)
@@ -67,7 +72,9 @@ def test_no_spatial_overlap_is_normal_skip(monkeypatch):
 @pytest.mark.django_db
 @override_settings(CROSSMATCH_CATALOGS=TEST_CATALOGS)
 def test_empty_result_is_normal(monkeypatch):
-    monkeypatch.setattr(crossmatch_mod, "crossmatch_alerts", lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(
+        crossmatch_mod, "crossmatch_alerts", lambda *a, **k: pd.DataFrame()
+    )
     alert = AlertFactory(status=Alert.Status.QUEUED)
 
     crossmatch_batch([str(alert.uuid)])

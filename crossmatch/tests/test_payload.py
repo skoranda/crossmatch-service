@@ -1,6 +1,7 @@
 """R6: build_catalog_payload coerces numpy/pandas scalars and null sentinels to
 JSON-native values (no NaN token, no non-serializable types), lowercases keys,
 and keeps a stable key set."""
+
 import json
 
 import numpy as np

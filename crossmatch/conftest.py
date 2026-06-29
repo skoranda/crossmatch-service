@@ -1,4 +1,5 @@
 """Shared pytest fixtures for the crossmatch test suite."""
+
 import pytest
 
 from tests.factories import make_alert_with_notifications
