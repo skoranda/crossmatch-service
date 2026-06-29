@@ -36,9 +36,17 @@ $ pip install -r crossmatch/requirements.base.txt
 
 ## Unit tests
 
-Run the unit tests using commands similar to the one below after launching the dev deployment.
+Tests run with `pytest` (via `pytest-django`) in-container, against the compose
+`django-db` Postgres service. Bring up the stack, then run the suite:
 
 ```bash
-docker compose -f docker/docker-compose.yaml up -d --build 
-docker exec -it crossmatch-api-server-1 bash -c 'python manage.py test crossmatch.tests.crossmatch'
+docker compose -f docker/docker-compose.yaml up -d
+# test deps come from crossmatch/requirements.dev.txt (pytest, pytest-django, factory_boy)
+docker exec -it crossmatch-celery-worker-1 sh -c 'cd /opt/crossmatch && python -m pytest'
 ```
+
+Config lives in `crossmatch/pytest.ini` (`DJANGO_SETTINGS_MODULE`, test paths).
+Run a subset with a path or `-k`, e.g. `python -m pytest tests/test_dispatch_notifications.py`.
+Tests that depend on commit semantics (the dispatch/ordering tests) use
+`@pytest.mark.django_db(transaction=True)` and require Postgres — they will not
+behave on SQLite.

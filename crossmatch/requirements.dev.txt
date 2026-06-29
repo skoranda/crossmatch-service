@@ -1,0 +1,6 @@
+# Test / development dependencies, layered on top of requirements.base.txt.
+# Not installed in the runtime image's base requirements; used by the test
+# harness (pytest) locally and in CI.
+pytest==9.1.1
+pytest-django==4.12.0
+factory_boy==3.3.3
