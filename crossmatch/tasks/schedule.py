@@ -127,8 +127,11 @@ def dispatch_notifications() -> None:
             alert_id=alert_id
         ).exclude(state=Notification.State.SENT).exists()
         if not has_unsent:
+            # alert_id is the FK to_field value (lsst_diaObject_diaObjectId), not
+            # the uuid pk — filtering by pk here never matches, so alerts never
+            # transitioned to NOTIFIED. Filter by the natural key instead.
             Alert.objects.filter(
-                pk=alert_id, status=Alert.Status.MATCHED
+                lsst_diaObject_diaObjectId=alert_id, status=Alert.Status.MATCHED
             ).update(status=Alert.Status.NOTIFIED)
 
 
