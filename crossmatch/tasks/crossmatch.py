@@ -2,6 +2,7 @@ import lsdb
 import pandas as pd
 from celery import shared_task
 from django.conf import settings
+from django.db import transaction
 from core.models import Alert, CatalogMatch, Notification
 from matching.catalog import crossmatch_alerts
 from matching.payload import build_catalog_payload
@@ -53,7 +54,14 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
             clean_df, ra_column='ra_deg', dec_column='dec_deg'
         )
 
-        # 2. Crossmatch against each configured catalog sequentially
+        # 2. Crossmatch against each configured catalog sequentially.
+        # Accumulate notifications across all catalogs and create them together
+        # with the MATCHED status update in one transaction at the end (step 4),
+        # so a PENDING notification is never visible to dispatch_notifications
+        # before its alert is MATCHED. Otherwise dispatch can send a notification
+        # and run its MATCHED-gated transition while the alert is still QUEUED;
+        # the transition no-ops and single-match alerts get stuck at MATCHED.
+        all_notifications = []
         for catalog_config in settings.CROSSMATCH_CATALOGS:
             catalog_name = catalog_config['name']
             source_id_col = catalog_config['source_id_column']
@@ -140,18 +148,24 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
             CatalogMatch.objects.bulk_create(
                 matches_to_create, batch_size=5000, ignore_conflicts=True
             )
-            Notification.objects.bulk_create(
-                notifications_to_create, batch_size=5000
-            )
-            logger.info('Wrote matches and notifications',
+            all_notifications.extend(notifications_to_create)
+            logger.info('Wrote matches, queued notifications',
                         catalog=catalog_name,
                         matched=len(matches_to_create), total=len(clean_df))
 
-        # 4. Transition ALL alerts in batch to MATCHED
-        Alert.objects.filter(pk__in=batch_ids).update(
-            status=Alert.Status.MATCHED
-        )
-        logger.info('Crossmatch batch complete', batch_size=len(batch_ids))
+        # 4. Create notifications and transition ALL alerts to MATCHED atomically,
+        # so notifications become dispatchable exactly when (not before) their
+        # alerts are MATCHED. See the note at step 2.
+        with transaction.atomic():
+            Notification.objects.bulk_create(
+                all_notifications, batch_size=5000
+            )
+            Alert.objects.filter(pk__in=batch_ids).update(
+                status=Alert.Status.MATCHED
+            )
+        logger.info('Crossmatch batch complete',
+                    batch_size=len(batch_ids),
+                    notifications=len(all_notifications))
 
     except Exception:
         logger.exception('Crossmatch batch failed, reverting to INGESTED',
