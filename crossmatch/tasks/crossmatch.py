@@ -78,9 +78,14 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
                     continue
                 raise
             except Exception:
+                # Fail loud: a catalog open/compute error (e.g. a dependency or
+                # version skew) must surface, not be swallowed into a silent
+                # zero-match. Re-raise so the batch reverts to INGESTED and
+                # retries rather than completing as MATCHED with nothing matched.
+                # "No spatial overlap" and empty results stay normal skips above.
                 logger.exception('Crossmatch failed for catalog',
                                  catalog=catalog_name)
-                continue
+                raise
 
             if result_df.empty:
                 logger.info('No matches found',
