@@ -11,17 +11,29 @@ This ideation covers an operator-only dashboard. Scientist-facing surfaces (filt
 
 ## Grounding context
 
+> **Grounding refresh (2026-06-30).** This ideation was written 2026-04-28; the
+> codebase and deployment have moved since. The ranked ideas and rejection table
+> below still hold, but several grounding facts were stale and are corrected in
+> this section. Key shifts: the service is now actually deployed to a DEV k3s
+> cluster on Jetstream2 via a **separate GitOps repo** (`crossmatch-service-k8s-gitops`,
+> ArgoCD-managed); the Dask cluster, Pitt-Google consumer, and an in-cluster
+> local-kafka are all live; `docs/solutions/` now exists and is populated; and we
+> have since hit real **DiskPressure + Postgres capacity incidents** that make the
+> monitoring spine (#4) and SLO/capacity work (#5) concrete needs rather than
+> hypothetical ones. Original-dated bullets are retained where still accurate.
+
 ### Codebase context
 - Django 6.0+ alert-ingest service. Stack: Celery (workers + beat), Dask cluster, Postgres, Valkey/Redis. Hopskotch publish at the tail.
-- Top-level dirs: `crossmatch/` (core), `docker/`, `kubernetes/`, `docs/`. K8s-native via Helm; oauth2-proxy already used in front of Flower in some envs.
-- Existing UI/observability surfaces: Django admin (in `INSTALLED_APPS`, undocumented exposure), Flower (running, no K8s ingress documented), Dask Bokeh dashboard (not exposed). No REST API (no DRF). No custom dashboard.
+- **Deployment (updated 2026-06-30):** Helm charts now live in a **separate GitOps repo** (`crossmatch-service-k8s-gitops`, `apps/crossmatch-service/` + `apps/dask/`), deployed to a DEV k3s cluster on Jetstream2 OpenStack and reconciled by **ArgoCD**. The app repo still carries `kubernetes/charts/` (local/legacy), but the deployed source of truth is the GitOps repo. A monitoring spine would be added there as ArgoCD app(s).
+- Existing UI/observability surfaces: Django admin (in `INSTALLED_APPS`, undocumented exposure), Flower (**now exposed via Traefik ingress at `basePath: flower`**), Dask Bokeh dashboard (not exposed). No REST API (no DRF). No custom dashboard.
+- **Access control (updated 2026-06-30):** oauth2-proxy is **not yet deployed** — the original "oauth2-proxy already in front of Flower" was aspirational. Exposed surfaces are currently gated by a **Traefik IPAllowList** (`allowlistSourceRanges`) "until oauth2-proxy lands." A monitoring spine inherits the same pre-auth posture; oauth2-proxy is still the intended end state.
 - Domain models: `Alert`, `AlertDelivery` (per-broker), `CatalogMatch` (Gaia/DES/DELVE/SkyMapper), `CrossmatchRun` (queued / running / succeeded / failed), `Notification`.
 - Brokers consumed: ANTARES (Kafka), Lasair (Kafka), Pitt-Google (Pub/Sub with server-side SMT JS UDF for reliability ≥ 0.6, replicas:1 pinned because `update_subscription` races).
-- Operator pain points: fragmented observability (Flower + admin live in different places); no per-broker drop-rate visibility; SMT UDF code on a live subscription has no in-repo reflection of what's actually attached; Dask version drift triage is manual; no surfaced "why did this alert get dropped"; no incident timeline; no MTTR or capacity reporting; no external-facing status surface for partners.
-- Leverage: clean ORM (HTMX-direct viable for low-volume operator views); Celery and Dask both expose Prometheus `/metrics`; oauth2-proxy precedent; Helm chart pattern is well-trodden.
+- Operator pain points: fragmented observability (Flower + admin live in different places); no per-broker drop-rate visibility; SMT UDF code on a live subscription has no in-repo reflection of what's actually attached; Dask version drift triage is manual; no surfaced "why did this alert get dropped"; no incident timeline; no MTTR or capacity reporting; no external-facing status surface for partners. **(Reinforced 2026-06-30:** the django-db PVC filling to 100% crash-looped Postgres and control-plane DiskPressure evicted pods — both went undetected until manual triage, exactly the gap a monitoring spine closes.)
+- Leverage: clean ORM (HTMX-direct viable for low-volume operator views); Celery and Dask both expose Prometheus `/metrics`; established Traefik ingress + IPAllowList pattern; ArgoCD app-of-apps pattern is well-trodden in the GitOps repo (adding a monitoring app follows the existing mold).
 
 ### Past learnings
-`docs/solutions/` does not exist. Operator-dashboard work is greenfield from an institutional-knowledge standpoint. Capture decisions via `/ce-compound` after work lands.
+**(Updated 2026-06-30.)** `docs/solutions/` now **exists and is populated** in both repos (conventions, design-patterns, developer-experience, logic-errors, performance-issues, runtime-errors, architecture-patterns). Directly relevant: the GitOps repo's `docs/solutions/performance-issues/control-plane-diskpressure-undersized-cinder-boot-volume.md` documents the DiskPressure incident a monitoring spine would have caught. Capture new monitoring decisions via `/ce-compound` after work lands.
 
 ### External context (operator-relevant prior art)
 - **Rubin LOVE** (Vue + SAL + ArgoCD): observatory control-room dashboard with role-separated views. Time-series live in a sidecar (EFD + Chronograf), keeping ops time-series out of the science store. Direct precedent for splitting ops time-series from the application database.
