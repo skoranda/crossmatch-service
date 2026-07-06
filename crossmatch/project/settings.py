@@ -235,6 +235,12 @@ CELERYD_REDIRECT_STDOUTS_LEVEL = "INFO"
 CELERY_TASK_SOFT_TIME_LIMIT = int(os.environ.get("CELERY_TASK_SOFT_TIME_LIMIT", "3600"))
 CELERY_TASK_TIME_LIMIT = int(os.environ.get("CELERY_TASK_TIME_LIMIT", "3800"))
 CELERY_TASK_TRACK_STARTED = True
+# Emit task lifecycle events so grafana/celery-exporter reports per-task
+# success/failure/runtime series, not just broker queue length (U7). Declarative
+# config is preferred over passing -E on the worker command line.
+# task_send_sent_event adds the task-sent event (publish-time / queue latency).
+CELERY_WORKER_SEND_TASK_EVENTS = True
+CELERY_TASK_SEND_SENT_EVENT = True
 
 ######################################################################
 # Lasair Kafka consumer

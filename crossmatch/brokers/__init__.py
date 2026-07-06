@@ -2,6 +2,7 @@
 
 from core.models import Alert, AlertDelivery
 from core.log import get_logger
+from core.metrics import record_ingest_success
 
 logger = get_logger(__name__)
 
@@ -41,6 +42,8 @@ def ingest_alert(canonical: dict, broker: str) -> bool:
             alert_id=alert_id,
             broker=broker,
         )
+        record_ingest_success(broker, 'duplicate')
         return False
     logger.info(f'New alert ingested: {alert_obj}')
+    record_ingest_success(broker, 'new')
     return True
