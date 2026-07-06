@@ -6,6 +6,7 @@ from django.conf import settings
 from django.utils import timezone
 from core.models import Notification
 from core.log import get_logger
+from core.metrics import NOTIFICATIONS_PUBLISHED
 
 logger = get_logger(__name__)
 
@@ -54,5 +55,9 @@ def send_hopskotch_batch(notifications):
                 notif.save(update_fields=['state', 'last_error', 'attempts', 'updated_at'])
                 failed += 1
 
+    if sent:
+        NOTIFICATIONS_PUBLISHED.labels(result='success').inc(sent)
+    if failed:
+        NOTIFICATIONS_PUBLISHED.labels(result='failure').inc(failed)
     logger.info('Hopskotch batch published',
                 topic=settings.HOPSKOTCH_TOPIC, sent=sent, failed=failed)

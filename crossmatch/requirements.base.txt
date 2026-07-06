@@ -22,7 +22,7 @@ pandas==2.3.3
 tornado==6.5.4
 dask[complete]==2026.1.2
 s3fs
-prometheus-client
+prometheus-client==0.25.0
 psycopg[binary]
 redis
 structlog

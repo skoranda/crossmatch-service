@@ -7,6 +7,7 @@ from core.models import Alert, CatalogMatch, Notification
 from matching.catalog import crossmatch_alerts
 from matching.payload import build_catalog_payload
 from core.log import get_logger
+from core.metrics import CROSSMATCH_BATCHES, CROSSMATCH_MATCHES
 logger = get_logger(__name__)
 
 
@@ -154,6 +155,7 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
                 matches_to_create, batch_size=5000, ignore_conflicts=True
             )
             all_notifications.extend(notifications_to_create)
+            CROSSMATCH_MATCHES.labels(catalog=catalog_name).inc(len(matches_to_create))
             logger.info('Wrote matches, queued notifications',
                         catalog=catalog_name,
                         matched=len(matches_to_create), total=len(clean_df))
@@ -168,11 +170,13 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
             Alert.objects.filter(pk__in=batch_ids).update(
                 status=Alert.Status.MATCHED
             )
+        CROSSMATCH_BATCHES.labels(result='completed').inc()
         logger.info('Crossmatch batch complete',
                     batch_size=len(batch_ids),
                     notifications=len(all_notifications))
 
     except Exception:
+        CROSSMATCH_BATCHES.labels(result='failed').inc()
         logger.exception('Crossmatch batch failed, reverting to INGESTED',
                          batch_size=len(batch_ids))
         try:
