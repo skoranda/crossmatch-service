@@ -643,6 +643,12 @@ Then update `.env` to set `HOPSKOTCH_BROKER_URL=kafka://local-kafka:9092` and
 `HOPSKOTCH_TOPIC=crossmatch-test`. Leave `HOPSKOTCH_USERNAME` empty — the
 publisher automatically disables authentication when credentials are not set.
 
+> **As deployed on DEV.** DEV runs exactly this local-Kafka path in the
+> deployment, not only in local testing: `HOPSKOTCH_BROKER_URL` is
+> `kafka://local-kafka:9092`, topic `crossmatch-test`, credentials empty so
+> `hop-client` publishes without SASL. An in-cluster `local-kafka` workload stands
+> in for SCiMMA Hopskotch; DEV does not publish to real Hopskotch.
+
 ---
 
 ## 5. PostgreSQL Database Design
@@ -824,6 +830,11 @@ Additionally:
   - Celery broker (`redis://valkey:6379/0`)
   - (Optional) Celery result backend (`redis://valkey:6379/1`) **or** disable results if not needed.
 
+> **As deployed on DEV.** Valkey runs as a workload named `redis` (a historical
+> name) pulling the `valkey/valkey` image; the `redis://` URL scheme is Valkey's
+> wire-compatible scheme, not a separate Redis. The design choice is Valkey, as
+> stated above.
+
 ### 6.3 Delivery semantics
 - Celery provides *at-least-once execution*; tasks can be re-delivered if workers crash.
 - We rely on DB idempotency (UPSERT + unique constraints) to make retries safe.
@@ -992,6 +1003,14 @@ When using a remote Dask scheduler (via `DASK_SCHEDULER_ADDRESS`), both the **sc
 **Local development:** Docker Compose includes optional `dask-scheduler` and `dask-worker` services behind a `dask-scheduler` profile, using the official Dask image (`ghcr.io/dask/dask`) with packages installed at startup via the `EXTRA_PIP_PACKAGES` environment variable. Activate with `docker compose --profile dask-scheduler up`. When the profile is not active, Dask runs locally within each Celery worker using its default synchronous scheduler.
 
 **Kubernetes production:** The Dask cluster is managed as a separate project, not by the crossmatch-service Helm chart. The Dask cluster is shared infrastructure used by multiple consumers. The crossmatch-service connects to it via the `DASK_SCHEDULER_ADDRESS` env var (set in Helm values to the Kubernetes service DNS name). Responsibility for ensuring the Dask cluster has compatible packages installed lies with the Dask cluster project.
+
+> **As deployed on DEV.** The Dask scheduler and worker run *inside* this cluster
+> in the `dask` namespace, delivered by the same `crossmatch-service-k8s-gitops`
+> repo (`apps/dask`) rather than as a separately-operated shared cluster.
+> `DASK_SCHEDULER_ADDRESS` targets the in-cluster service
+> (`tcp://dask-scheduler.dask.svc.cluster.local:8786`). The package-parity
+> requirement above is unchanged — the DEV Dask image must carry the same pinned
+> versions as the service.
 
 **Why exact version pinning is required (no escape hatch):**
 
