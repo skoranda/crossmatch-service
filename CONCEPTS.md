@@ -5,6 +5,48 @@ concepts with project-specific meaning. Seeded with core domain vocabulary, then
 accretes as ce-compound and ce-compound-refresh process learnings; direct edits are
 fine. Glossary only, not a spec or catch-all.
 
+## Crossmatch domain
+
+### Crossmatch
+The core operation, and the service itself: matching each incoming Alert's sky position
+against astronomical source catalogs to find known sources nearby. The match is purely
+positional — coordinates within a fixed angular radius — not based on brightness, color,
+or time.
+
+### Alert
+A transient-source detection ingested from a Broker, carrying a sky position (right
+ascension and declination, in degrees) and a Rubin object identifier. Alerts are the
+input stream the service crossmatches and publishes results for.
+
+### Broker
+An upstream service that delivers the Vera C. Rubin Observatory alert stream — ANTARES,
+Lasair, and Pitt-Google. Each Broker has its own ingestion and normalization path that
+maps its wire format onto the common Alert shape.
+
+### HATS catalog
+A large astronomical source catalog stored in HATS (Hierarchical Adaptive Tiling Scheme)
+format and queried via LSDB on the Dask cluster — Gaia DR3, DES Y6 Gold, DELVE DR3 Gold,
+and SkyMapper DR4. Column naming is inconsistent across catalogs: some lowercase, some
+uppercase, and SkyMapper coordinates carry a J2000 suffix.
+
+### Match
+A catalog source found within the crossmatch radius of an Alert, together with its
+angular separation. The Match is the unit of result the service produces.
+
+### Payload
+The per-Match JSON record published to the public astronomy community over Hopskotch. It
+is built from a per-catalog selection of catalog columns, with values coerced from
+catalog/dataframe types to JSON-native ones and keys normalized to a stable form.
+
+### diaObjectId
+The Rubin identifier of an Alert's source object: a 64-bit integer that must be carried
+as int64 end to end and coerced explicitly before JSON, never allowed to round-trip
+through a float.
+
+### Hopskotch
+The SCiMMA Kafka-based distribution service over which the service publishes Payloads to
+the public astronomy community.
+
 ## Auth gate (operator surfaces)
 
 ### Operator surface
