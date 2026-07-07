@@ -135,6 +135,7 @@ Three independent ingest services consume from separate broker streams and write
 - **PostgreSQL**: system of record (alerts, schedules, match results, notifications, job audit).
 - **Valkey**: Celery broker/result backend.
 - (Optional) Object storage/cache for LSDB/HATS data, depending on catalog deployment.
+- **Operator & delivery layer (as deployed on DEV):** an authentication-gated monitoring surface (Grafana) and Celery dashboard (Flower), a Traefik ingress with cert-manager TLS, and ArgoCD-driven GitOps delivery. See §9.3–§9.6.
 
 ### 2.2 Broker Filter Standard
 
@@ -643,11 +644,21 @@ Then update `.env` to set `HOPSKOTCH_BROKER_URL=kafka://local-kafka:9092` and
 `HOPSKOTCH_TOPIC=crossmatch-test`. Leave `HOPSKOTCH_USERNAME` empty — the
 publisher automatically disables authentication when credentials are not set.
 
+> **As deployed on DEV.** DEV runs exactly this local-Kafka path in the
+> deployment, not only in local testing: `HOPSKOTCH_BROKER_URL` is
+> `kafka://local-kafka:9092`, topic `crossmatch-test`, credentials empty so
+> `hop-client` publishes without SASL. An in-cluster `local-kafka` workload stands
+> in for SCiMMA Hopskotch; DEV does not publish to real Hopskotch.
+
 ---
 
 ## 5. PostgreSQL Database Design
 
 > For running ad-hoc SQL or inspecting these tables in the dockerized dev environment, see [`docs/solutions/developer-experience/query-dev-database-via-docker-exec.md`](docs/solutions/developer-experience/query-dev-database-via-docker-exec.md) — the dev DB's `5432` port is not host-published, so `psql` runs through `docker compose exec django-db`.
+
+> **As deployed on DEV.** These tables live in an in-cluster PostgreSQL
+> Deployment named `django-db` (image `postgres:18.3`), not an external managed
+> database; Django migrations manage the schema.
 
 ### 5.1 Conventions
 - `TIMESTAMPTZ` for datetimes.
@@ -824,6 +835,11 @@ Additionally:
   - Celery broker (`redis://valkey:6379/0`)
   - (Optional) Celery result backend (`redis://valkey:6379/1`) **or** disable results if not needed.
 
+> **As deployed on DEV.** Valkey runs as a workload named `redis` (a historical
+> name) pulling the `valkey/valkey` image; the `redis://` URL scheme is Valkey's
+> wire-compatible scheme, not a separate Redis. The design choice is Valkey, as
+> stated above.
+
 ### 6.3 Delivery semantics
 - Celery provides *at-least-once execution*; tasks can be re-delivered if workers crash.
 - We rely on DB idempotency (UPSERT + unique constraints) to make retries safe.
@@ -993,6 +1009,14 @@ When using a remote Dask scheduler (via `DASK_SCHEDULER_ADDRESS`), both the **sc
 
 **Kubernetes production:** The Dask cluster is managed as a separate project, not by the crossmatch-service Helm chart. The Dask cluster is shared infrastructure used by multiple consumers. The crossmatch-service connects to it via the `DASK_SCHEDULER_ADDRESS` env var (set in Helm values to the Kubernetes service DNS name). Responsibility for ensuring the Dask cluster has compatible packages installed lies with the Dask cluster project.
 
+> **As deployed on DEV.** The Dask scheduler and worker run *inside* this cluster
+> in the `dask` namespace, delivered by the same `crossmatch-service-k8s-gitops`
+> repo (`apps/dask`) rather than as a separately-operated shared cluster.
+> `DASK_SCHEDULER_ADDRESS` targets the in-cluster service
+> (`tcp://dask-scheduler.dask.svc.cluster.local:8786`). The package-parity
+> requirement above is unchanged — the DEV Dask image must carry the same pinned
+> versions as the service.
+
 **Why exact version pinning is required (no escape hatch):**
 
 We investigated whether a pickle-protocol setting or alternative Dask serializer could make minor version drift between the client and the cluster tolerable. It cannot. The findings:
@@ -1128,6 +1152,18 @@ Dependencies:
 - PostgreSQL (external managed or in-cluster)
 - Valkey (in-cluster)
 
+> **As deployed on DEV.** The running workloads in the `crossmatch-service`
+> namespace are the `antares-consumer`, `lasair-consumer`, and
+> `pittgoogle-consumer` StatefulSets (one consumer per broker), a `celery-worker`
+> StatefulSet (2 replicas), a `celery-beat` StatefulSet, and a `flower`
+> Deployment. There is no separate `notifier` Deployment — publishing runs inside
+> the Celery workers. Both dependencies run in-cluster: `django-db`
+> (`postgres:18.3`) and Valkey (deployed as a workload named `redis`, running the
+> `valkey/valkey` image). Delivery is ArgoCD-managed (see §9.6); the service image
+> is published to the GitLab Container Registry at
+> `registry.gitlab.com/ncsa-caps-rse/crossmatch-service-k8s-gitops`, and the DEV
+> overlay currently pins tag `0.3.0`.
+
 #### 9.1.1 Container images
 - Prefer **one service image** with multiple entrypoints/commands.
 - All components run the same image tag (ensures reproducibility).
@@ -1202,6 +1238,13 @@ Secrets:
 - Hopskotch SASL credentials (`HOPSKOTCH_USERNAME`, `HOPSKOTCH_PASSWORD`)
 - LSST return credentials (future)
 
+> **As deployed on DEV.** The broker `*_GROUP_ID` values use the
+> `scimma-crossmatch-dev` suffix (not the `-prod` defaults shown above);
+> `HOPSKOTCH_BROKER_URL` points at the in-cluster `local-kafka` instead of
+> SCiMMA Hopskotch (see §4.6); and `DASK_SCHEDULER_ADDRESS` targets the in-cluster
+> Dask scheduler (see §7.4). Secret material is delivered as SealedSecrets, not
+> raw Secrets (see §9.6).
+
 #### 9.1.4 Health checks
 - Ingest: readiness requires DB connectivity and successful ANTARES client init.
 - Workers: readiness requires DB + LSDB catalog reachable.
@@ -1210,6 +1253,10 @@ Secrets:
 #### 9.1.5 Observability in cluster
 - Expose Prometheus metrics via a small HTTP server per process (e.g., `prometheus_client.start_http_server`).
 - Structured logs to stdout.
+
+> **As deployed on DEV.** A full monitoring spine (Prometheus + Grafana, plus
+> Celery and PostgreSQL exporters) scrapes the service and its infrastructure —
+> see §9.4.
 
 ### 9.2 Local Development (Docker Compose)
 
@@ -1228,6 +1275,79 @@ Notes:
 - If you want live code edits, either:
   - build a `:dev` image variant that mounts source, or
   - use `docker compose build` frequently.
+
+> The subsections below (§9.3–§9.6) describe the operator-facing and delivery
+> layers **as currently deployed on the DEV cluster**. They are DEV reality
+> rather than a prescribed target design; a production deployment may differ.
+
+### 9.3 Operator Surfaces & Access Control
+
+Two internal, ops-facing web UIs — the Grafana monitoring dashboards (§9.4) and
+the Flower Celery dashboard — are exposed as **operator surfaces** and gated
+behind per-user authentication. They are not public and are not part of the
+science data path.
+
+The gate is a single **oauth2-proxy** acting as an OIDC client of **CILogon**,
+enforced at the edge by Traefik `forwardAuth`. A dedicated **auth host**,
+`auth.crossmatch-dev.scimma.org`, serves the `/oauth2/*` endpoints; one
+oauth2-proxy and one CILogon client front both surfaces.
+
+- **Authorization keys on the CILogon `sub`, never on email.** oauth2-proxy runs
+  with `--oidc-email-claim=sub` and an `--authenticated-emails-file` **roster** of
+  allowed `sub` values; `--email-domain` is deliberately unset (setting it to `*`
+  would OR to allow-all and bypass the roster). Email is a display label only —
+  upstream federations reassign it. Editing the roster ConfigMap grants or revokes
+  access; oauth2-proxy watches the file and hot-reloads, so no pod restart is
+  needed.
+- **Redirect mechanics.** The per-host middleware chain is `forwardAuth` → `errors`
+  → `chain`. `/oauth2/auth` returns only `202` (authorized) or `401` (no session) —
+  never `403`; the `errors` middleware is scoped to `401` only and redirects an
+  unauthenticated request to CILogon. A user who authenticates but is not on the
+  roster is denied at `/oauth2/callback` (`403` on the auth host), which is
+  terminal, not a redirect loop. The `errors` middleware references the
+  oauth2-proxy Service across namespaces, which requires Traefik
+  `providers.kubernetesCRD.allowCrossNamespace: true`.
+- **Grafana coexistence.** Grafana keeps anonymous Viewer access and its own admin
+  login behind the gate, so operators land read-only and admins can still sign in.
+
+### 9.4 Monitoring & Observability
+
+Monitoring is the `kube-prometheus-stack` Helm release in the `monitoring`
+namespace: **Prometheus**, **Grafana**, **Alertmanager**, `node-exporter`, and
+`kube-state-metrics`. Two application-level exporters augment it: a
+**`celery-exporter`** (task/queue metrics) and a **`postgres-exporter`**
+(`django-db` metrics). Grafana is the primary operator surface and is reached
+through the gate (§9.3) at `grafana.crossmatch-dev.scimma.org`.
+
+### 9.5 Ingress & TLS
+
+Ingress is **Traefik** on k3s, deployed as a **DaemonSet** binding host ports
+80/443 on each node, with a ClusterIP Service; external traffic reaches the
+cluster through the Jetstream2 floating IP (`149.165.168.62`). DEV hostnames:
+
+- `crossmatch-dev.scimma.org` — Flower at path `/flower` (TLS `flower-tls`).
+- `grafana.crossmatch-dev.scimma.org` — Grafana (TLS `grafana-tls`).
+- `auth.crossmatch-dev.scimma.org` — the oauth2-proxy auth host (TLS
+  `oauth2-proxy-tls`).
+
+TLS certificates are issued by **cert-manager** from Let's Encrypt via the HTTP-01
+challenge, one `Certificate` per host. (Operational note: a Traefik hostPort
+DaemonSet must use a delete-then-recreate update strategy
+(`maxUnavailable: 1 / maxSurge: 0`) — the chart-default surge strategy deadlocks
+because the new pod cannot bind a host port the old pod still holds.)
+
+### 9.6 GitOps / ArgoCD Delivery
+
+DEV is delivered by **ArgoCD**, which reconciles the cluster against the
+`crossmatch-service-k8s-gitops` repo. Each component is an ArgoCD `Application`.
+There is **no app-of-apps**: the `Application` objects live in `argocd-apps/` and
+are applied by hand (`kubectl apply -f argocd-apps/<file>`), while each app's
+child resources auto-sync from its `apps/` path source. Consequently, merging to
+the gitops `main` updates an app's *contents* but does **not** create or update an
+`Application` itself — a new or changed Application must be re-applied manually.
+Secret material is delivered as bitnami **SealedSecrets** (sealed with `kubeseal`),
+so only encrypted blobs live in git. Deployed namespaces: `crossmatch-service`,
+`monitoring`, `oauth2-proxy`, `dask`, `traefik`, `cert-manager`, and `argocd`.
 
 ---
 
