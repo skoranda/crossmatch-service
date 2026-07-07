@@ -135,6 +135,7 @@ Three independent ingest services consume from separate broker streams and write
 - **PostgreSQL**: system of record (alerts, schedules, match results, notifications, job audit).
 - **Valkey**: Celery broker/result backend.
 - (Optional) Object storage/cache for LSDB/HATS data, depending on catalog deployment.
+- **Operator & delivery layer (as deployed on DEV):** an authentication-gated monitoring surface (Grafana) and Celery dashboard (Flower), a Traefik ingress with cert-manager TLS, and ArgoCD-driven GitOps delivery. See §9.3–§9.6.
 
 ### 2.2 Broker Filter Standard
 
@@ -654,6 +655,10 @@ publisher automatically disables authentication when credentials are not set.
 ## 5. PostgreSQL Database Design
 
 > For running ad-hoc SQL or inspecting these tables in the dockerized dev environment, see [`docs/solutions/developer-experience/query-dev-database-via-docker-exec.md`](docs/solutions/developer-experience/query-dev-database-via-docker-exec.md) — the dev DB's `5432` port is not host-published, so `psql` runs through `docker compose exec django-db`.
+
+> **As deployed on DEV.** These tables live in an in-cluster PostgreSQL
+> Deployment named `django-db` (image `postgres:18.3`), not an external managed
+> database; Django migrations manage the schema.
 
 ### 5.1 Conventions
 - `TIMESTAMPTZ` for datetimes.
