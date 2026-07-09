@@ -81,8 +81,13 @@ matches are published over Hopskotch (Kafka, via hop-client). Active development
 - **Never commit to `main`.** Create a branch first and commit there, so the work can be
   pushed to `origin` and opened as a pull request against `upstream`. If a commit lands on
   `main` by mistake, move it onto a branch: `git branch <name> && git reset --hard HEAD~1`.
-- Claude branches and commits only — **leave `git push`, the PR against `upstream`, and the
-  merge to the maintainer** (matches the global "never push to remote" rule).
+- **Pushing feature branches to `origin` is allowed**, and so is **opening a pull request on
+  `origin` from the pushed branch** (base `origin/main`). This project rule overrides the
+  global "never push to remote" default, but only for `origin`
+  (`git@github.com:skoranda/crossmatch-service.git`) — push the branch, then `gh pr create`
+  against `origin`.
+- **Still off-limits for Claude:** pushing to `upstream`, pushing to (or force-pushing) `main`
+  on any remote, the PR against `upstream`, and every merge — those stay with the maintainer.
 
 ## Don't
 - Add or upgrade a dependency without re-pinning every pin site and aligning the Dask cluster's
@@ -90,5 +95,6 @@ matches are published over Hopskotch (Kafka, via hop-client). Active development
   `docs/solutions/conventions/dependency-pin-upgrade-pattern-2026-05-12.md` and the fail-fast
   Dask version check in `core/dask.py`.
 - Reformat or churn files you weren't asked to change.
-- Publish on the maintainer's behalf — branch for changes and leave the PR / merge / `git push`
-  sequence to the maintainer.
+- Push to `upstream`, push/force-push `main`, open a PR against `upstream`, or merge anything —
+  those stay with the maintainer. (Pushing feature branches and opening PRs on `origin` is fine;
+  see Git workflow.)
