@@ -50,10 +50,17 @@ class Alert(models.Model):
     # was killed. Distinct from ingest_time, which is when the alert first
     # arrived and may be far older than when its batch was actually dispatched.
     queued_at = models.DateTimeField(null=True, blank=True)
+    # DOUBLE PRECISION NULL    LSST real/bogus score, captured first-seen (read model)
+    reliability = models.FloatField(null=True)
+    # BIGINT NULL    HEALPix NESTED pixel (order 16) from ra_deg/dec_deg (read model)
+    healpix_ipix = models.BigIntegerField(null=True)
 
     class Meta:
         indexes = [
             models.Index(fields=['status'], name='core_alert_status_idx'),
+            models.Index(fields=['reliability'], name='core_alert_reliability_idx'),
+            models.Index(fields=['event_time'], name='core_alert_event_time_idx'),
+            models.Index(fields=['healpix_ipix'], name='core_alert_healpix_ipix_idx'),
         ]
 
 
