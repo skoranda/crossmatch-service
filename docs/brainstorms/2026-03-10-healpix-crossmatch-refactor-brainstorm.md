@@ -21,7 +21,7 @@ The original design assumed HEROIC planned pointings (center + FOV radius) would
 5. **No external dependency** — eliminates the HEROIC API dependency, periodic sync task, and associated failure modes.
 6. **LSDB does it better** — `lsdb.from_dataframe()` converts a pandas DataFrame into an LSDB Catalog with adaptive HEALPix partitioning (orders 0-7), then `catalog.crossmatch()` handles spatial alignment and matching. No manual HEALPix cell grouping needed.
 
-See `healpix_vs_visit_crossmatch.md` for the full argument against visit-based constraints.
+See `docs/healpix_vs_visit_crossmatch.md` for the full argument against visit-based constraints.
 
 ## Key Decisions
 
