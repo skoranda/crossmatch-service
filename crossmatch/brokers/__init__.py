@@ -3,6 +3,7 @@
 from django.db import close_old_connections, connection
 
 from core.models import Alert, AlertDelivery
+from core.healpix import radec_to_ipix
 from core.log import get_logger
 from core.metrics import record_ingest_success
 
@@ -20,7 +21,13 @@ def ingest_alert(canonical: dict, broker: str) -> bool:
 
     canonical keys:
         lsst_diaObject_diaObjectId, ra_deg, dec_deg,
-        lsst_diaSource_diaSourceId, event_time, payload
+        lsst_diaSource_diaSourceId, event_time, reliability, payload
+
+    Read-model columns are populated first-seen: ``reliability`` (the broker's
+    real/bogus score, or None when absent) and ``healpix_ipix`` (derived from
+    the coordinates) are written only when the Alert row is first created, via
+    the ``get_or_create`` defaults. Repeat deliveries of the same object leave
+    both unchanged.
     """
     # The broker consumers call this from long-lived management-command loops
     # with no request/response cycle, so Django never fires the signals that
@@ -42,6 +49,8 @@ def ingest_alert(canonical: dict, broker: str) -> bool:
             dec_deg=canonical['dec_deg'],
             lsst_diaSource_diaSourceId=canonical.get('lsst_diaSource_diaSourceId'),
             event_time=canonical['event_time'],
+            reliability=canonical.get('reliability'),
+            healpix_ipix=radec_to_ipix(canonical['ra_deg'], canonical['dec_deg']),
             payload=canonical['payload'],
             status=Alert.Status.INGESTED,
         ),

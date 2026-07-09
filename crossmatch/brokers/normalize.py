@@ -19,6 +19,7 @@ def normalize_antares(raw_alert: dict) -> dict:
         'dec_deg': raw_alert['lsst_diaObject_dec'],
         'lsst_diaSource_diaSourceId': raw_alert['lsst_diaSource_diaSourceId'],
         'event_time': datetime.fromtimestamp(raw_alert['ant_time_received'], tz=timezone.utc),
+        'reliability': raw_alert.get('lsst_diaSource_reliability'),
         'payload': raw_alert,
     }
 
@@ -38,6 +39,7 @@ def normalize_lasair(raw_alert: dict) -> dict:
         'dec_deg': raw_alert['decl'],
         'lsst_diaSource_diaSourceId': None,
         'event_time': _MJD_EPOCH + timedelta(days=raw_alert['firstDiaSourceMjdTai']),
+        'reliability': raw_alert.get('latestR'),
         'payload': raw_alert,
     }
 
@@ -70,5 +72,6 @@ def normalize_pittgoogle(alert) -> dict:
         'dec_deg': dia_object['dec'],
         'lsst_diaSource_diaSourceId': dia_source.get('diaSourceId'),
         'event_time': event_time,
+        'reliability': dia_source.get('reliability'),
         'payload': payload,
     }
