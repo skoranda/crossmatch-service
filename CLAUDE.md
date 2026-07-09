@@ -44,9 +44,13 @@ matches are published over Hopskotch (Kafka, via hop-client). Active development
 
 ## Commands
 - Launch local dev stack: `docker compose -f docker/docker-compose.yaml up -d --build`
-- Run tests: Django test runner **inside a container**, per `docs/developer.md`
-  (e.g. `docker exec -it <api-server-container> bash -c 'python manage.py test ...'`).
-  Note: the test suite is currently minimal — don't treat a green run as broad coverage.
+- Run tests: **pytest / pytest-django inside a container**, against the compose Postgres
+  (`django-db`), per `docs/developer.md`. The app image does not ship pytest, so install the
+  dev deps first. One-off (does not start consumers/celery/valkey/kafka; reuses a running
+  `django-db`; pytest-django uses its own `test_` database, so dev data is untouched):
+  `docker compose --env-file docker/.env -f docker/docker-compose.yaml run --rm --no-deps celery-worker sh -c 'pip install -q -r requirements.dev.txt && python -m pytest'`.
+  When a worker container is already up: `docker exec crossmatch-celery-worker-1 sh -c 'cd /opt/crossmatch && python -m pytest'`.
+  Config is `crossmatch/pytest.ini` (`testpaths = tests brokers`); subset with a path or `-k`.
 - Query the dev database: it's the `django-db` compose service, not published to a host port —
   reach it with `docker compose -f docker/docker-compose.yaml exec django-db psql -U crossmatch_service_admin -d scimma_crossmatch_service`.
   See `docs/solutions/developer-experience/query-dev-database-via-docker-exec.md`.
