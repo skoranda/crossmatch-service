@@ -106,15 +106,17 @@ def test_reliability_is_frozen_first_seen():
 
 
 @pytest.mark.django_db
-def test_ipix_computed_at_ingest_and_unchanged_on_repeat():
+def test_ipix_computed_at_ingest_and_frozen_first_seen():
     ingest_alert(_canonical(reliability=0.70, ra_deg=100.0, dec_deg=-45.0), "antares")
     alert = Alert.objects.get(lsst_diaObject_diaObjectId=9_500_000_001)
     expected = radec_to_ipix(100.0, -45.0)
     assert alert.healpix_ipix == expected
-    # A repeat delivery does not recompute or change ipix.
-    ingest_alert(_canonical(reliability=0.90, ra_deg=100.0, dec_deg=-45.0), "lasair")
+    # A repeat delivery reporting DIFFERENT coordinates does not recompute or
+    # change ipix — it stays frozen at the first delivery's position.
+    ingest_alert(_canonical(reliability=0.90, ra_deg=250.0, dec_deg=10.0), "lasair")
     alert.refresh_from_db()
     assert alert.healpix_ipix == expected
+    assert alert.healpix_ipix != radec_to_ipix(250.0, 10.0)
 
 
 @pytest.mark.django_db
@@ -124,3 +126,17 @@ def test_null_reliability_persists_as_none():
     alert = Alert.objects.get(lsst_diaObject_diaObjectId=9_500_000_001)
     assert alert.reliability is None
     assert alert.healpix_ipix is not None
+
+
+@pytest.mark.django_db
+def test_out_of_range_coordinate_stores_null_ipix_without_dropping_alert():
+    # A declination beyond the pole must not abort ingest (cdshealpix would
+    # raise/panic); healpix_ipix degrades to NULL and the alert still persists.
+    assert (
+        ingest_alert(
+            _canonical(dia_id=9_600_000_001, ra_deg=10.0, dec_deg=95.0), "antares"
+        )
+        is True
+    )
+    alert = Alert.objects.get(lsst_diaObject_diaObjectId=9_600_000_001)
+    assert alert.healpix_ipix is None

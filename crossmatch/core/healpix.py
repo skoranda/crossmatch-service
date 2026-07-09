@@ -10,6 +10,7 @@ via ``hats`` (see the plan's KTD1), so no new dependency is introduced.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import astropy.units as u
 import numpy as np
@@ -22,7 +23,23 @@ from cdshealpix import nested
 HEALPIX_ORDER = 16
 
 
-def radec_to_ipix(ra_deg: float, dec_deg: float) -> int:
+def _coords_valid(ra_deg: float, dec_deg: float) -> bool:
+    """True when the coordinates are safe to pass to cdshealpix.
+
+    cdshealpix rejects a declination outside [-90, 90] with a ValueError and
+    panics its native layer on NaN, so a single malformed coordinate would
+    otherwise abort the alert's ingest or the whole backfill migration. Callers
+    treat an invalid coordinate as "no pixel" (nullable ``healpix_ipix``) rather
+    than letting it propagate — matching the repo's per-row-defensive convention.
+    """
+    return (
+        math.isfinite(ra_deg)
+        and math.isfinite(dec_deg)
+        and -90.0 <= dec_deg <= 90.0
+    )
+
+
+def radec_to_ipix(ra_deg: float, dec_deg: float) -> int | None:
     """Return the NESTED HEALPix pixel index for one sky position.
 
     Args:
@@ -30,8 +47,12 @@ def radec_to_ipix(ra_deg: float, dec_deg: float) -> int:
         dec_deg: Declination in degrees.
 
     Returns:
-        The order-``HEALPIX_ORDER`` NESTED pixel index as a Python int.
+        The order-``HEALPIX_ORDER`` NESTED pixel index as a Python int, or
+        ``None`` when the coordinate is non-finite or the declination is out of
+        range (so a bad row degrades the read model instead of failing ingest).
     """
+    if not _coords_valid(ra_deg, dec_deg):
+        return None
     ipix = nested.lonlat_to_healpix(
         np.array([ra_deg], dtype=float) * u.deg,
         np.array([dec_deg], dtype=float) * u.deg,
@@ -40,27 +61,39 @@ def radec_to_ipix(ra_deg: float, dec_deg: float) -> int:
     return int(ipix[0])
 
 
-def radec_to_ipix_array(ra_deg, dec_deg) -> list[int]:
+def radec_to_ipix_array(
+    ra_deg: Sequence[float], dec_deg: Sequence[float]
+) -> list[int | None]:
     """Return NESTED HEALPix pixel indices for a batch of sky positions.
 
     Vectorized companion to :func:`radec_to_ipix` for bulk work such as the
     existing-corpus backfill, where a per-row scalar call would pay the
-    array-construction and native-call overhead once per row.
+    array-construction and native-call overhead once per row. Invalid rows
+    (non-finite coordinate or out-of-range declination) yield ``None`` and are
+    excluded from the native call so one bad row cannot abort the batch.
 
     Args:
         ra_deg: Sequence of right ascensions in degrees.
         dec_deg: Sequence of declinations in degrees, aligned with ``ra_deg``.
 
     Returns:
-        A list of order-``HEALPIX_ORDER`` NESTED pixel indices (Python ints),
-        one per input coordinate pair, in input order.
+        A list of order-``HEALPIX_ORDER`` NESTED pixel indices (Python ints) or
+        ``None`` for invalid coordinates, one per input pair, in input order.
     """
-    ipix = nested.lonlat_to_healpix(
-        np.asarray(ra_deg, dtype=float) * u.deg,
-        np.asarray(dec_deg, dtype=float) * u.deg,
-        depth=HEALPIX_ORDER,
-    )
-    return [int(x) for x in ipix]
+    ra = np.asarray(ra_deg, dtype=float)
+    dec = np.asarray(dec_deg, dtype=float)
+    valid = np.isfinite(ra) & np.isfinite(dec) & (dec >= -90.0) & (dec <= 90.0)
+
+    result: list[int | None] = [None] * len(ra)
+    if valid.any():
+        ipix = nested.lonlat_to_healpix(
+            ra[valid] * u.deg,
+            dec[valid] * u.deg,
+            depth=HEALPIX_ORDER,
+        )
+        for position, pixel in zip(np.nonzero(valid)[0], ipix):
+            result[int(position)] = int(pixel)
+    return result
 
 
 def cone_ipix_ranges(

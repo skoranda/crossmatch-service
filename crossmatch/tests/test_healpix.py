@@ -37,6 +37,21 @@ def test_point_index_array_matches_scalar():
     assert all(isinstance(x, int) for x in batch)
 
 
+def test_invalid_coordinates_return_none():
+    # Out-of-range declination and non-finite coordinates must not reach
+    # cdshealpix (which raises / panics); they degrade to None instead.
+    assert radec_to_ipix(10.0, 95.0) is None
+    assert radec_to_ipix(10.0, -95.0) is None
+    assert radec_to_ipix(float("nan"), 10.0) is None
+    assert radec_to_ipix(10.0, float("nan")) is None
+
+
+def test_array_isolates_invalid_rows():
+    # A bad row yields None without aborting the batch or shifting other rows.
+    result = radec_to_ipix_array([10.0, 20.0, 30.0], [95.0, 30.0, float("nan")])
+    assert result == [None, radec_to_ipix(20.0, 30.0), None]
+
+
 def test_cone_ranges_cover_ra_wraparound():
     # Covers AE4: a cone centered near RA 0 matches objects at RA 359.9 and 0.1.
     # 0.1 deg == 360 arcsec, so the cone must be at least that wide.
