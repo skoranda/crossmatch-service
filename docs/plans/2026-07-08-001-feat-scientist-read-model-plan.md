@@ -4,7 +4,7 @@ type: feat
 date: 2026-07-08
 topic: scientist-read-model
 artifact_contract: ce-unified-plan/v1
-artifact_readiness: requirements-only
+artifact_readiness: implementation-ready
 product_contract_source: ce-brainstorm
 execution: code
 ---
@@ -16,6 +16,8 @@ execution: code
 - **Objective:** Build the indexed read-model substrate on the alert table — a first-class `reliability` column, a HEALPix `ipix` spatial index, and an `event_time` index — so the scientist-facing query surfaces (ranked transients, cone/region search, object lookup) can run in interactive time instead of the multi-minute timeouts they hit today.
 - **Product authority:** Maintainer (Scott Koranda).
 - **Open blockers:** None. The Lasair reliability key (`latestR`) is confirmed; everything else is planning-time detail.
+- **Execution profile:** Behavior-bearing ingest + schema change; verify in-container with pytest (`docker compose --env-file docker/.env -f docker/docker-compose.yaml run --rm --no-deps celery-worker sh -c 'pip install -q -r requirements.dev.txt && python -m pytest'`). Prefer test-first for the HEALPix helper (U2) and the extraction/first-seen logic (U3) — both have precise input→output contracts.
+- **Product Contract preservation:** unchanged. This enrichment adds only the HOW (Planning Contract, Implementation Units, Verification, Definition of Done); R1-R8 and AE1-4 are preserved verbatim.
 
 ## Product Contract
 
@@ -96,11 +98,14 @@ flowchart TB
 
 ### Outstanding Questions
 
-**Deferred to Planning**
-- Verify Lasair alerts actually arrive carrying `latestR` once volume picks up (the filter edit is hours old; not blocking — the path-map arm is defined either way, and a null-safe extraction handles absence).
-- HEALPix resolution (`nside`/order) and the specific HEALPix library.
-- Whether the `ipix` backfill runs as a single data migration or batched, and how the reliability column and its indexes are added without a long lock on the live table.
-- Index shapes: whether the reliability ranking uses a partial index excluding nulls, and the exact index types for `ipix` and `event_time`.
+**Resolved during planning**
+- HEALPix library and resolution: use `cdshealpix`/`astropy-healpix` (already locked transitive deps via `hats` — see KTD1), NESTED order 16 (KTD4). No new dependency.
+- Index shapes: three plain btree indexes now (`reliability`, `event_time`, `healpix_ipix`); the composite/partial ranked-query index is deferred to the query-layer work that issues those queries (KTD5).
+- Schema/backfill lock profile: columns added nullable (no table rewrite); `ipix` backfilled in batches; `reliability` not backfilled (KTD6).
+
+**Deferred to implementation / ops**
+- Verify Lasair alerts actually arrive carrying `latestR` once volume picks up (the filter edit is recent; not blocking — the path-map arm is defined either way and extraction is null-safe).
+- Production index creation on the live 1M-row table should use `CREATE INDEX CONCURRENTLY` to avoid a write lock; the Django migration builds indexes non-concurrently, which is fine for DEV. Out of scope for this data-layer plan; note for the eventual prod rollout.
 
 ### Sources / Research
 
@@ -111,3 +116,107 @@ flowchart TB
 - `crossmatch/project/settings.py:260-275` — `MIN_DIASOURCE_RELIABILITY` broker filter gate.
 - Live DEV verification, 2026-07-08 (1,049,463 alerts): reliability present on 100% of ANTARES and Pitt-Google native payloads (range 0.60-1.0), Lasair not yet observed; full-table `JSONB`/unindexed scans time out (>2 min).
 - `docs/ideation/2026-07-08-scientist-facing-data-products-ideation.md` — idea #1, of which this is the requirements-only plan.
+- HEALPix library availability (verified 2026-07-08 in the dev image): `cdshealpix==0.8.1` and `mocpy==0.20.0` are already locked transitive deps via `hats`, and `astropy-healpix==1.1.3` via `antares-client` (`crossmatch/requirements.lock`); U2 uses `cdshealpix` (via `hats`), so no new dependency is added.
+- `crossmatch/core/models.py:49-52` — `Alert.Meta.indexes` currently holds one index (`core_alert_status_idx`); the new indexes extend this list.
+- `crossmatch/core/migrations/0001_initial.py` — the only existing migration; new migrations are `0002`/`0003`.
+- `crossmatch/tests/test_ingest.py`, `crossmatch/tests/test_factories.py` — pytest + `@pytest.mark.django_db` patterns, the `_canonical(...)` ingest helper, and `AlertFactory` to mirror in new tests.
+
+---
+
+## Planning Contract
+
+### Key Technical Decisions
+
+- KTD1. **HEALPix geometry via already-present `cdshealpix`/`astropy-healpix` — no new dependency.** Both are already-locked transitive deps (`cdshealpix` via `hats`, `astropy-healpix` via `antares-client`), verified importable in the dev image, so the HEALPix-over-q3c decision costs zero new pins and sidesteps the repo's dependency-pin/Dask-version-skew gotcha entirely. `cdshealpix` (NESTED) yields covering pixel *ranges* for a cone directly (the shape a `WHERE ipix BETWEEN lo AND hi` query wants) and is the same library `mocpy` builds on, keeping the MOC path open. This overrides the requirements-only assumption that the library was an open choice.
+- KTD2. **Per-broker extraction stays in the normalizers; `ipix` computed in a shared helper called from `ingest_alert`.** `normalize_*` already own each broker's payload shape, so the reliability path map lives there (one line each). `ingest_alert` stays broker-agnostic: it reads `canonical.get('reliability')` and computes `ipix` from the canonical `ra_deg`/`dec_deg` via the U2 helper. No broker-specific logic leaks into ingest.
+- KTD3. **First-seen via `get_or_create(defaults=...)` only.** `reliability` and `healpix_ipix` are set in the `defaults=` block, which `get_or_create` applies only on creation. Repeat deliveries hit the existing row and change nothing — no update path is added, matching current ingest semantics (`crossmatch/brokers/__init__.py:24`).
+- KTD4. **HEALPix NESTED, order 16 (nside 65536, ~3.2 arcsec pixels), as a single module constant** (`HEALPIX_ORDER` in `crossmatch/core/healpix.py`). Fine enough that cone-search boundary overshoot is small before the exact fine-filter, int64-safe, and used identically at ingest (point→ipix) and query time (cone→ranges). Tunable in one place.
+- KTD5. **Three plain btree indexes now** (`reliability`, `event_time`, `healpix_ipix`); the composite / partial-excluding-null index that best serves `rank_transients(hours, n)` is deferred to the query-layer work that will actually issue that query. The data layer provides index-backed access paths (R8); query-shape-specific index tuning belongs with the query.
+- KTD6. **Columns added nullable (no table rewrite); `ipix` backfilled, `reliability` not.** Adding two nullable columns is a metadata-only migration. `healpix_ipix` is backfilled for existing rows from stored coordinates (cheap, deterministic — U4); `reliability` is left null on existing rows (forward-only, per the Product Contract). Index builds on the 1M-row DEV table lock briefly and are acceptable; prod uses `CONCURRENTLY` (Outstanding Questions).
+
+### Assumptions
+
+- `cdshealpix` remains available via the pinned `hats==0.9.0` (and `astropy-healpix` via `antares-client`); they are not added to `requirements.base.txt` because they are transitive. U2 depends on `cdshealpix`; if `hats` is ever unpinned in a way that drops it, U2 would need an explicit pin (re-pinning every site per repo convention).
+- Lasair `latestR` will arrive in ingested payloads once post-filter-edit volume flows; extraction is null-safe until then.
+
+---
+
+## Implementation Units
+
+### U1. Add read-model columns and indexes to the Alert model
+
+- **Goal:** Add `reliability` (nullable double) and `healpix_ipix` (nullable bigint) columns to `Alert`, plus btree indexes on `reliability`, `healpix_ipix`, and `event_time`.
+- **Requirements:** R1, R5, R7.
+- **Dependencies:** none.
+- **Files:** `crossmatch/core/models.py` (modify), `crossmatch/core/migrations/0002_add_read_model_columns.py` (create), `crossmatch/tests/test_read_model_schema.py` (create).
+- **Approach:** Add `reliability = models.FloatField(null=True)` and `healpix_ipix = models.BigIntegerField(null=True)` to `Alert`; extend `Meta.indexes` with three named `models.Index` entries (mirroring the existing `core_alert_status_idx`). Generate the migration (`AddField` x2, `AddIndex` x3). Columns are nullable so the migration does not rewrite the table.
+- **Patterns to follow:** existing `Meta.indexes` entry and field declarations in `crossmatch/core/models.py`; migration style in `crossmatch/core/migrations/0001_initial.py`.
+- **Test scenarios:** an `Alert` persists with `reliability=None` and `healpix_ipix=None`; an `Alert` persists and round-trips `reliability=0.7` and `healpix_ipix=123456`; the migration state / DB introspection shows the three new indexes present. (Schema-level; one persistence round-trip test plus an index-presence assertion.)
+- **Verification:** the test DB migrates cleanly (pytest-django applies migrations) and the round-trip + index-presence tests pass.
+
+### U2. HEALPix spatial helper (point→ipix, cone→ipix ranges, fine-filter)
+
+- **Goal:** A `crossmatch/core/healpix.py` module exposing `radec_to_ipix(ra_deg, dec_deg) -> int`, `cone_ipix_ranges(ra_deg, dec_deg, radius_arcsec) -> list[tuple[int, int]]`, and `angular_separation_arcsec(ra1, dec1, ra2, dec2) -> float`, NESTED at `HEALPIX_ORDER`, correct across RA wraparound and the poles.
+- **Requirements:** R5, R6.
+- **Dependencies:** none (can land in parallel with U1).
+- **Files:** `crossmatch/core/healpix.py` (create), `crossmatch/tests/test_healpix.py` (create).
+- **Approach:** Use `cdshealpix` NESTED (`lonlat_to_healpix` for the point index; `cone_search` for the covering pixel set) and collapse the covering set into contiguous `[lo, hi]` NESTED ranges. Provide a haversine `angular_separation_arcsec` for the caller's exact fine-filter. Define `HEALPIX_ORDER = 16` here.
+- **Execution note:** implement test-first — the input→output contracts (known coordinate → stable pixel; cone membership; separation) are precise and cheap to assert before writing the helper.
+- **Test scenarios:**
+  - `radec_to_ipix` returns a stable documented pixel for a fixed coordinate; two points closer than one pixel share an index; two widely separated points differ.
+  - **Covers AE4.** `cone_ipix_ranges(0.0, 0.0, 60)` produces ranges whose membership includes `radec_to_ipix(359.99, 0.0)` and `radec_to_ipix(0.01, 0.0)` — RA wrap at 0/360 is handled.
+  - a point just inside the radius passes `angular_separation_arcsec <= radius`; a point just outside fails — the fine-filter is exact.
+  - a cone near Dec +89.9 returns valid ranges without error (pole handling).
+- **Verification:** `test_healpix.py` passes, including the RA-wrap and pole cases.
+
+### U3. Extract reliability per-broker and populate reliability + ipix at ingest (first-seen)
+
+- **Goal:** Carry `reliability` through each normalizer via the per-broker path map, and in `ingest_alert` set `reliability` (first-seen) and `healpix_ipix` in the `get_or_create` `defaults`.
+- **Requirements:** R2, R3, R4, R5.
+- **Dependencies:** U1 (columns), U2 (ipix helper).
+- **Files:** `crossmatch/brokers/normalize.py` (modify), `crossmatch/brokers/__init__.py` (modify), `crossmatch/tests/test_read_model_ingest.py` (create).
+- **Approach:** `normalize_antares` adds `'reliability': raw_alert.get('lsst_diaSource_reliability')`; `normalize_lasair` adds `'reliability': raw_alert.get('latestR')`; `normalize_pittgoogle` adds `'reliability': dia_source.get('reliability')`. In `ingest_alert`, the `defaults=` block gains `reliability=canonical.get('reliability')` and `healpix_ipix=radec_to_ipix(canonical['ra_deg'], canonical['dec_deg'])`. All extraction is null-safe `.get()`. No update path — first-seen falls out of `get_or_create`.
+- **Execution note:** test-first for the per-broker extraction and the first-seen freeze.
+- **Test scenarios:**
+  - **Covers AE1.** a canonical built from an ANTARES-shaped payload sets `reliability` from `lsst_diaSource_reliability`; a Pitt-Google payload from `diaSource.reliability`; a Lasair payload from `latestR`; a payload missing the key yields `reliability is None`.
+  - **Covers AE2.** create an object via broker A with `reliability=0.70`; a second ingest (same or other broker) reporting `0.90` leaves the stored `reliability` at `0.70` and `healpix_ipix` unchanged.
+  - a newly created `Alert` has `healpix_ipix == radec_to_ipix(ra_deg, dec_deg)`.
+  - **Covers AE3 (storage half).** a payload lacking the reliability key persists `reliability=None`.
+  - the existing `crossmatch/tests/test_ingest.py` idempotency tests still pass unchanged (no regression to the two-step ingest gate).
+- **Verification:** new ingest tests pass; existing `test_ingest.py` stays green.
+
+### U4. Backfill healpix_ipix for existing rows (reliability stays forward-only)
+
+- **Goal:** A data migration computing `healpix_ipix` from `ra_deg`/`dec_deg` for all existing rows in batches; `reliability` is left null.
+- **Requirements:** R5 (existing corpus populated), R4 (existing rows null reliability).
+- **Dependencies:** U1 (column), U2 (helper).
+- **Files:** `crossmatch/core/migrations/0003_backfill_healpix_ipix.py` (create), `crossmatch/tests/test_backfill_ipix.py` (create).
+- **Approach:** `RunPython` with a batched update (`.iterator()` + `bulk_update(['healpix_ipix'])`) computing `ipix` via the U2 helper; reverse operation is a no-op. `reliability` is explicitly untouched. Keep batch size modest for the live 1M-row table.
+- **Execution note:** verify by seeding rows with null `healpix_ipix`, running the backfill callable, and asserting populated `ipix` with still-null `reliability`.
+- **Test scenarios:**
+  - seed several `Alert`s with `healpix_ipix=None` (pre-migration state), run the backfill callable, assert each row's `healpix_ipix == radec_to_ipix(ra_deg, dec_deg)` and `reliability is None`.
+  - the backfill is safe to re-run (already-populated rows recompute to the identical value).
+  - the reverse migration runs without error (no-op).
+- **Verification:** `test_backfill_ipix.py` passes; the migration applies on a populated test DB.
+
+---
+
+## Verification Contract
+
+| Gate | Command / signal | Applies to |
+|---|---|---|
+| VG1 | Full suite green in-container: `docker compose --env-file docker/.env -f docker/docker-compose.yaml run --rm --no-deps celery-worker sh -c 'pip install -q -r requirements.dev.txt && python -m pytest'` | all units |
+| VG2 | Migrations apply cleanly on a fresh test DB (a green pytest-django run implies this) | U1, U4 |
+| VG3 | New tests present and passing: `test_read_model_schema.py` (U1), `test_healpix.py` (U2), `test_read_model_ingest.py` (U3), `test_backfill_ipix.py` (U4) | U1-U4 |
+| VG4 | No regression: existing `crossmatch/tests/test_ingest.py` idempotency tests still pass | U3 |
+
+---
+
+## Definition of Done
+
+- `Alert` has `reliability` (nullable double) and `healpix_ipix` (nullable bigint) columns, with btree indexes on `reliability`, `event_time`, and `healpix_ipix`.
+- `reliability` is extracted per-broker (ANTARES `lsst_diaSource_reliability`, Pitt-Google `diaSource.reliability`, Lasair `latestR`), stored first-seen, and null when absent.
+- `healpix_ipix` is computed at ingest and backfilled for existing rows; `reliability` is not backfilled.
+- `crossmatch/core/healpix.py` provides point→ipix, cone→ipix ranges, and an exact fine-filter, RA-wrap/pole correct, using the already-present `cdshealpix`/`astropy-healpix` (no new dependency).
+- The full pytest suite is green in-container and the existing ingest idempotency tests are unregressed.
+- No REST / web / MCP surface or query-service function is built — the scope boundary (data layer only) is honored.
