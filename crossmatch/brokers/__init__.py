@@ -42,19 +42,26 @@ def ingest_alert(canonical: dict, broker: str) -> bool:
     if not connection.in_atomic_block:
         close_old_connections()
     alert_id = canonical['lsst_diaObject_diaObjectId']
-    alert_obj, _ = Alert.objects.get_or_create(
-        lsst_diaObject_diaObjectId=alert_id,
-        defaults=dict(
-            ra_deg=canonical['ra_deg'],
-            dec_deg=canonical['dec_deg'],
-            lsst_diaSource_diaSourceId=canonical.get('lsst_diaSource_diaSourceId'),
-            event_time=canonical['event_time'],
-            reliability=canonical.get('reliability'),
-            healpix_ipix=radec_to_ipix(canonical['ra_deg'], canonical['dec_deg']),
-            payload=canonical['payload'],
-            status=Alert.Status.INGESTED,
-        ),
-    )
+    try:
+        # Fast path for repeat deliveries (the common case under multi-broker
+        # fan-in): the row already exists, so avoid building defaults and paying
+        # the discarded HEALPix computation on the ingest hot path. get_or_create
+        # below still handles the first-seen create race.
+        alert_obj = Alert.objects.get(lsst_diaObject_diaObjectId=alert_id)
+    except Alert.DoesNotExist:
+        alert_obj, _ = Alert.objects.get_or_create(
+            lsst_diaObject_diaObjectId=alert_id,
+            defaults=dict(
+                ra_deg=canonical['ra_deg'],
+                dec_deg=canonical['dec_deg'],
+                lsst_diaSource_diaSourceId=canonical.get('lsst_diaSource_diaSourceId'),
+                event_time=canonical['event_time'],
+                reliability=canonical.get('reliability'),
+                healpix_ipix=radec_to_ipix(canonical['ra_deg'], canonical['dec_deg']),
+                payload=canonical['payload'],
+                status=Alert.Status.INGESTED,
+            ),
+        )
     _, created = AlertDelivery.objects.get_or_create(
         alert=alert_obj,
         broker=broker,
