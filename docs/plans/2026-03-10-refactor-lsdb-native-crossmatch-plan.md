@@ -14,7 +14,7 @@ This is a clean-break refactor: HEROIC is fully removed (not feature-flagged), a
 
 ## Problem Statement / Motivation
 
-The original design assumed HEROIC planned pointings (center + FOV radius) would constrain LSDB spatial queries. After analysis (see `healpix_vs_visit_crossmatch.md`), this is unnecessary:
+The original design assumed HEROIC planned pointings (center + FOV radius) would constrain LSDB spatial queries. After analysis (see `docs/healpix_vs_visit_crossmatch.md`), this is unnecessary:
 
 - Alerts have precise coordinates; visit pointings only give ~3.5 degree field centers
 - HATS catalogs use adaptive HEALPix partitioning; LSDB handles partition alignment automatically
@@ -215,7 +215,7 @@ LSDB's `from_dataframe()` converts alerts to an adaptive HEALPix catalog and `cr
 ### Internal References
 
 - Brainstorm: `docs/brainstorms/2026-03-10-healpix-crossmatch-refactor-brainstorm.md`
-- Design argument: `healpix_vs_visit_crossmatch.md`
+- Design argument: `docs/healpix_vs_visit_crossmatch.md`
 - Pseudocode (superseded): `pseudo-code-healpix-cell-grouping.py`
 - Alert model: `crossmatch/core/models.py:8-52`
 - CatalogMatch model: `crossmatch/core/models.py:105-138`

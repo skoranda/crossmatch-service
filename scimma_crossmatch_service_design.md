@@ -946,7 +946,7 @@ The original design considered using Rubin telescope pointing data (via HEROIC) 
 - **Alerts span multiple visits** — a batch of 100k alerts may come from multiple visits, nights, and filters.
 - **No external dependency** — eliminates the HEROIC API dependency, periodic sync task, and associated failure modes.
 
-See `healpix_vs_visit_crossmatch.md` for the full analysis.
+See `docs/healpix_vs_visit_crossmatch.md` for the full analysis.
 
 ### Margin Caches and Edge Effects
 
@@ -1357,7 +1357,7 @@ so only encrypted blobs live in git. Deployed namespaces: `crossmatch-service`,
 2. **ANTARES topic and auth**: exact configuration fields for `StreamingClient` (topic name, resume semantics).
 3. ~~**Match radius and columns**~~ — **Resolved**: 1 arcsec default radius, configurable via `CROSSMATCH_RADIUS_ARCSEC`. Store `source_id`, `ra`, `dec`, and match distance. Consumers query Gaia directly for additional fields.
 4. ~~**Planned footprint gating**~~ — **Resolved**: removed. LSDB native crossmatching uses alert RA/Dec directly; no pointing constraints needed.
-5. ~~**HEROIC API details**~~ — **Resolved**: HEROIC integration removed. See `healpix_vs_visit_crossmatch.md` for rationale.
+5. ~~**HEROIC API details**~~ — **Resolved**: HEROIC integration removed. See `docs/healpix_vs_visit_crossmatch.md` for rationale.
 6. ~~**Lasair Kafka auth**~~ — **Resolved**: `lasair_consumer` connects to `lasair-lsst-kafka.lsst.ac.uk:9092` without credentials. No SASL config or token required for the ingest path.
 7. ~~**Lasair filter/topic**~~ — **Resolved**: filter `reliability_moderate` created on Lasair web UI; topic `lasair_366SCiMMA_reliability_moderate`. Criteria: `latestR >= 0.6` AND `nDiaSources >= 1` AND last detection within 1 day, per the broker filter standard (§2.2). The Lasair UI filter must be re-created to apply the `>=` operator. See §2.1 B2 for full SQL.
 8. **Lasair alert schema**: what is the full JSON schema of a Lasair alert? Lasair uses `objectId` as the top-level key — confirm this is always identical to `lsst_diaObject_diaObjectId`. Confirm which field maps to LSST positional fields (RA/Dec).
