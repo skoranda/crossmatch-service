@@ -18,6 +18,14 @@ A transient-source detection ingested from a Broker, carrying a sky position (ri
 ascension and declination, in degrees) and a Rubin object identifier. Alerts are the
 input stream the service crossmatches and publishes results for.
 
+### Reliability
+The LSST real/bogus score for a detection: a 0-to-1 estimate of the probability that a
+diaSource is a genuine astrophysical transient rather than an imaging artifact. Brokers
+apply a minimum-reliability filter before delivery, so delivered Alerts carry a score
+above that floor. It is the ranking basis for "most likely transient" queries. The value
+is per-diaSource and, where the read model persists it, is captured at an object's first
+detection.
+
 ### Broker
 An upstream service that delivers the Vera C. Rubin Observatory alert stream — ANTARES,
 Lasair, and Pitt-Google. Each Broker has its own ingestion and normalization path that
