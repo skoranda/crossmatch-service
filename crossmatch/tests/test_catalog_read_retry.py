@@ -40,9 +40,39 @@ def test_transient_detected_via_exception_chain():
         assert _is_transient_read_error(exc) is True
 
 
+def test_filenotfound_from_flaky_endpoint_is_transient():
+    # data.lsdb.io drops a range read under load; fsspec surfaces it as
+    # FileNotFoundError(url) even though the parquet file exists (GET -> 200).
+    exc = FileNotFoundError(
+        "https://data.lsdb.io/hats/des/des_y6_gold/des_y6_gold_5arcs/"
+        "dataset/Norder=5/Dir=0/Npix=4351.parquet"
+    )
+    assert _is_transient_read_error(exc) is True
+
+
 def test_deterministic_errors_are_not_transient():
     assert _is_transient_read_error(ValueError("requested columns not found")) is False
     assert _is_transient_read_error(RuntimeError("Catalogs do not overlap")) is False
+
+
+@override_settings(CROSSMATCH_READ_RETRIES=3, CROSSMATCH_READ_RETRY_BACKOFF_SECONDS=0)
+def test_retries_filenotfound_then_succeeds():
+    calls = {"n": 0}
+
+    def read_fn():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FileNotFoundError(
+                "https://data.lsdb.io/hats/des/des_y6_gold/des_y6_gold_5arcs/"
+                "dataset/Norder=5/Dir=0/Npix=4351.parquet"
+            )
+        return "matches"
+
+    with mock.patch("matching.catalog.time.sleep"):
+        result = _read_with_retry(read_fn, "des_y6_gold")
+
+    assert result == "matches"
+    assert calls["n"] == 2
 
 
 @override_settings(CROSSMATCH_READ_RETRIES=3, CROSSMATCH_READ_RETRY_BACKOFF_SECONDS=0)
