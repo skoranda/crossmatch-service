@@ -26,16 +26,25 @@ def dispatch_crossmatch_batch() -> None:
     from tasks.crossmatch import crossmatch_batch
 
     # Concurrency guard: skip if a batch is legitimately in progress.
-    # If QUEUED alerts are older than 2x the task time limit, assume
-    # the worker was killed and auto-recover by reverting to INGESTED.
+    # crossmatch_batch reverts its own alerts to INGESTED when it raises, so a
+    # QUEUED batch older than the real max runtime means the worker was
+    # hard-killed (pod restart, OOM, SIGKILL) before that revert could run —
+    # auto-recover it. Age is measured from queued_at (when the batch was
+    # dispatched), not ingest_time (when the alert first arrived, possibly much
+    # earlier), so a live batch of long-ingested alerts is never reverted.
     queued = Alert.objects.filter(status=Alert.Status.QUEUED)
     if queued.exists():
-        oldest_queued = queued.order_by('ingest_time').first()
-        age = (timezone.now() - oldest_queued.ingest_time).total_seconds()
-        stuck_threshold = settings.CELERY_TASK_TIME_LIMIT * 2
+        oldest_queued = queued.order_by('queued_at').first()
+        # queued_at is set on every dispatch below; fall back to ingest_time only
+        # for rows queued before this field existed.
+        queued_since = oldest_queued.queued_at or oldest_queued.ingest_time
+        age = (timezone.now() - queued_since).total_seconds()
+        stuck_threshold = settings.CROSSMATCH_BATCH_STUCK_SECONDS
         if age < stuck_threshold:
             return  # Batch legitimately in progress
-        count_recovered = queued.update(status=Alert.Status.INGESTED)
+        count_recovered = queued.update(
+            status=Alert.Status.INGESTED, queued_at=None
+        )
         logger.warning('Auto-recovered stuck QUEUED alerts',
                        count=count_recovered, oldest_age_seconds=age,
                        threshold_seconds=stuck_threshold)
@@ -66,7 +75,7 @@ def dispatch_crossmatch_batch() -> None:
         if not batch_ids:
             return
         Alert.objects.filter(pk__in=batch_ids).update(
-            status=Alert.Status.QUEUED
+            status=Alert.Status.QUEUED, queued_at=timezone.now()
         )
         # Convert UUIDs to strings for JSON serialization in Celery
         str_ids = [str(uid) for uid in batch_ids]

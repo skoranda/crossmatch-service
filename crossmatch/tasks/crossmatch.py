@@ -181,7 +181,7 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
                          batch_size=len(batch_ids))
         try:
             Alert.objects.filter(pk__in=batch_ids).update(
-                status=Alert.Status.INGESTED
+                status=Alert.Status.INGESTED, queued_at=None
             )
         except Exception:
             logger.exception('Failed to revert batch status')
