@@ -307,6 +307,12 @@ HOPSKOTCH_PASSWORD = os.environ.get('HOPSKOTCH_PASSWORD', '')
 ######################################################################
 # Database
 #
+# Persist DB connections across work units and validate a reused connection
+# before handing it out. The broker consumers recycle connections explicitly via
+# close_old_connections() (see brokers.ingest_alert); with health checks on, a
+# reused connection that Postgres has severed is transparently reopened instead
+# of raising "the connection is closed", and CONN_MAX_AGE avoids reconnecting on
+# every alert. Set CONN_MAX_AGE=0 to restore Django's close-after-each-use.
 DATABASES = {
     'default': {
         'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.postgresql'),
@@ -315,6 +321,8 @@ DATABASES = {
         'PASSWORD': os.getenv('DATABASE_PASSWORD', 'password'),
         'HOST': os.getenv('DATABASE_HOST', '127.0.0.1'),
         'PORT': os.getenv('DATABASE_PORT', '5432'),
+        'CONN_MAX_AGE': int(os.getenv('CONN_MAX_AGE', '60')),
+        'CONN_HEALTH_CHECKS': True,
     },
     'sqlite': {
         'ENGINE': 'django.db.backends.sqlite3',
