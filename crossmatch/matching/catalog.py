@@ -1,11 +1,72 @@
 """Generic LSDB HATS catalog crossmatch."""
 
+import time
+
 import lsdb
 import pandas as pd
 from django.conf import settings
 from core.log import get_logger
 
 logger = get_logger(__name__)
+
+# Class names of transient remote-read failures worth retrying. The HATS
+# catalogs for DES/DELVE/SkyMapper are served over HTTP from data.lsdb.io, which
+# intermittently drops the connection mid parquet range read. aiohttp raises
+# ServerDisconnectedError (and kin); fsspec's parquet cache then re-surfaces it
+# as a confusing TypeError ("can't concat ServerDisconnectedError to bytes",
+# "'ServerDisconnectedError' object is not subscriptable"). We match on the class
+# name so both the raw aiohttp error and its fsspec-wrapped TypeError are caught,
+# without importing aiohttp directly.
+_TRANSIENT_READ_SIGNATURES = (
+    'ServerDisconnectedError',
+    'ServerTimeoutError',
+    'ClientConnectionError',
+    'ClientOSError',
+    'ClientPayloadError',
+    'ConnectionResetError',
+)
+
+
+def _is_transient_read_error(exc: BaseException) -> bool:
+    """True if ``exc`` (or anything in its cause/context chain) is a transient
+    remote-read failure worth retrying, matched by class name or message text so
+    fsspec's TypeError-wrapped form is caught too. Deterministic errors (bad
+    columns, no spatial overlap, version skew) return False so they still
+    fail loud immediately.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        text = f'{type(cur).__name__}: {cur}'
+        if any(sig in text for sig in _TRANSIENT_READ_SIGNATURES):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _read_with_retry(read_fn, catalog_name: str):
+    """Run ``read_fn`` (a catalog read/compute), retrying only on transient
+    remote-read disconnects with linear backoff. Non-transient errors re-raise
+    immediately, preserving the fail-loud contract in tasks/crossmatch.py.
+    """
+    attempts = settings.CROSSMATCH_READ_RETRIES
+    backoff = settings.CROSSMATCH_READ_RETRY_BACKOFF_SECONDS
+    for attempt in range(1, attempts + 1):
+        try:
+            return read_fn()
+        except Exception as exc:
+            if attempt < attempts and _is_transient_read_error(exc):
+                logger.warning(
+                    'Transient catalog read error; retrying',
+                    catalog=catalog_name,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    error=str(exc),
+                )
+                time.sleep(backoff * attempt)
+                continue
+            raise
 
 # Module-level cache: {catalog_name: lsdb_catalog}
 _catalog_cache = {}
@@ -91,17 +152,24 @@ def crossmatch_alerts(alerts_catalog, catalog_config):
         their upstream-native names. Distance in _dist_arcsec. Returns empty
         DataFrame if no matches found.
     """
-    catalog = _get_catalog(catalog_config)
     # Alert DataFrame uses ra_deg/dec_deg; catalog RA/Dec and payload column
     # names vary (e.g. 'ra'/'dec' for Gaia, 'RA'/'DEC' for DES). The loaded set
     # is now the full payload_columns union, but none overlap the alert columns
     # (_get_catalog rejects any that do via _ALERT_COLUMNS), so
     # suffix_method='overlapping_columns' leaves the catalog columns un-suffixed.
-    matches = alerts_catalog.crossmatch(
-        catalog,
-        n_neighbors=1,
-        radius_arcsec=settings.CROSSMATCH_RADIUS_ARCSEC,
-        suffixes=('_alert', '_catalog'),
-        suffix_method='overlapping_columns',
-    )
-    return matches.compute()
+    #
+    # The read (catalog open + compute) runs under _read_with_retry so a
+    # transient data.lsdb.io disconnect retries instead of failing the whole
+    # multi-catalog batch; deterministic errors still fail loud immediately.
+    def _read():
+        catalog = _get_catalog(catalog_config)
+        matches = alerts_catalog.crossmatch(
+            catalog,
+            n_neighbors=1,
+            radius_arcsec=settings.CROSSMATCH_RADIUS_ARCSEC,
+            suffixes=('_alert', '_catalog'),
+            suffix_method='overlapping_columns',
+        )
+        return matches.compute()
+
+    return _read_with_retry(_read, catalog_config['name'])

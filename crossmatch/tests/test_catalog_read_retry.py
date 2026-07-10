@@ -1,0 +1,92 @@
+"""Transient remote-read resilience for catalog crossmatch.
+
+The HATS catalogs for DES/DELVE/SkyMapper are served over HTTP from
+data.lsdb.io, which intermittently drops the connection mid parquet range read.
+aiohttp raises ServerDisconnectedError, which fsspec's parquet cache re-surfaces
+as confusing TypeErrors ("can't concat ServerDisconnectedError to bytes",
+"'ServerDisconnectedError' object is not subscriptable"). Without retry, one
+transient blip on one catalog fails the whole multi-catalog crossmatch batch.
+
+These cover the retry helpers in matching/catalog.py: retry ONLY on the
+transient network signature, re-raise everything else immediately so the
+fail-loud path still surfaces real errors (version skew, bad columns, no overlap).
+"""
+
+from unittest import mock
+
+import pytest
+from django.test import override_settings
+
+from matching.catalog import _is_transient_read_error, _read_with_retry
+
+
+class _FakeServerDisconnectedError(Exception):
+    """Stands in for aiohttp.client_exceptions.ServerDisconnectedError by name."""
+
+
+def test_transient_detected_via_wrapping_typeerror_message():
+    # The exact surface fsspec produces from a dropped range read.
+    exc = TypeError("can't concat ServerDisconnectedError to bytes")
+    assert _is_transient_read_error(exc) is True
+
+
+def test_transient_detected_via_exception_chain():
+    try:
+        try:
+            raise _FakeServerDisconnectedError("Server disconnected")
+        except _FakeServerDisconnectedError as cause:
+            raise TypeError("'ServerDisconnectedError' object is not subscriptable") from cause
+    except TypeError as exc:
+        assert _is_transient_read_error(exc) is True
+
+
+def test_deterministic_errors_are_not_transient():
+    assert _is_transient_read_error(ValueError("requested columns not found")) is False
+    assert _is_transient_read_error(RuntimeError("Catalogs do not overlap")) is False
+
+
+@override_settings(CROSSMATCH_READ_RETRIES=3, CROSSMATCH_READ_RETRY_BACKOFF_SECONDS=0)
+def test_retries_transient_then_succeeds():
+    calls = {"n": 0}
+
+    def read_fn():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("can't concat ServerDisconnectedError to bytes")
+        return "matches"
+
+    with mock.patch("matching.catalog.time.sleep"):
+        result = _read_with_retry(read_fn, "skymapper_dr4")
+
+    assert result == "matches"
+    assert calls["n"] == 2
+
+
+@override_settings(CROSSMATCH_READ_RETRIES=3, CROSSMATCH_READ_RETRY_BACKOFF_SECONDS=0)
+def test_transient_exhausts_retries_then_raises():
+    calls = {"n": 0}
+
+    def read_fn():
+        calls["n"] += 1
+        raise TypeError("can't concat ServerDisconnectedError to bytes")
+
+    with mock.patch("matching.catalog.time.sleep"):
+        with pytest.raises(TypeError):
+            _read_with_retry(read_fn, "des_y6_gold")
+
+    assert calls["n"] == 3  # all attempts consumed, then re-raised
+
+
+@override_settings(CROSSMATCH_READ_RETRIES=3, CROSSMATCH_READ_RETRY_BACKOFF_SECONDS=0)
+def test_deterministic_error_not_retried():
+    calls = {"n": 0}
+
+    def read_fn():
+        calls["n"] += 1
+        raise ValueError("requested columns not found in catalog schema")
+
+    with mock.patch("matching.catalog.time.sleep"):
+        with pytest.raises(ValueError):
+            _read_with_retry(read_fn, "gaia_dr3")
+
+    assert calls["n"] == 1  # surfaced immediately, fail-loud preserved
