@@ -17,6 +17,14 @@ logger = get_logger(__name__)
 # "'ServerDisconnectedError' object is not subscriptable"). We match on the class
 # name so both the raw aiohttp error and its fsspec-wrapped TypeError are caught,
 # without importing aiohttp directly.
+#
+# FileNotFoundError is included deliberately: when data.lsdb.io is slow/flaky
+# under a large batch's concurrent range reads, fsspec surfaces the dropped read
+# as FileNotFoundError(url) even though the parquet file exists (a direct GET
+# returns HTTP 200). Retrying recovers it. A genuinely missing file still fails
+# loud after the retries are exhausted, so this only costs a little latency in
+# the rare true-missing case; requested-column and catalog-schema errors are
+# validated up front in _get_catalog and raise ValueError, not FileNotFoundError.
 _TRANSIENT_READ_SIGNATURES = (
     'ServerDisconnectedError',
     'ServerTimeoutError',
@@ -24,6 +32,7 @@ _TRANSIENT_READ_SIGNATURES = (
     'ClientOSError',
     'ClientPayloadError',
     'ConnectionResetError',
+    'FileNotFoundError',
 )
 
 
