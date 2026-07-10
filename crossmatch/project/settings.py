@@ -136,6 +136,15 @@ CROSSMATCH_BATCH_MAX_SIZE = int(
     os.getenv('CROSSMATCH_BATCH_MAX_SIZE', '100000')
 )
 
+# Resilience for transient remote HATS catalog reads (data.lsdb.io drops
+# connections mid parquet read -> aiohttp ServerDisconnectedError). Total read
+# attempts per catalog and the linear backoff base between them. Set retries to
+# 1 to disable retrying.
+CROSSMATCH_READ_RETRIES = int(os.getenv('CROSSMATCH_READ_RETRIES', '3'))
+CROSSMATCH_READ_RETRY_BACKOFF_SECONDS = float(
+    os.getenv('CROSSMATCH_READ_RETRY_BACKOFF_SECONDS', '1.0')
+)
+
 ######################################################################
 # Django apps and middlewares
 #
