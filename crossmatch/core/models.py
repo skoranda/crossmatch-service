@@ -45,6 +45,11 @@ class Alert(models.Model):
         default=Status.INGESTED,
         null=False,
     )
+    # TIMESTAMPTZ NULL    set when the alert enters QUEUED (a batch is dispatched
+    # for it); used by dispatch_crossmatch_batch to detect a batch whose worker
+    # was killed. Distinct from ingest_time, which is when the alert first
+    # arrived and may be far older than when its batch was actually dispatched.
+    queued_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [

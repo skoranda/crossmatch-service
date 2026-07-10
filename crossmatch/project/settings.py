@@ -135,6 +135,16 @@ CROSSMATCH_BATCH_MAX_WAIT_SECONDS = int(
 CROSSMATCH_BATCH_MAX_SIZE = int(
     os.getenv('CROSSMATCH_BATCH_MAX_SIZE', '100000')
 )
+# A QUEUED batch whose worker was hard-killed (pod restart, OOM, SIGKILL) never
+# runs the crossmatch task's own revert-on-exception path, so the dispatcher
+# recovers it: QUEUED alerts whose queued_at is older than this are reverted to
+# INGESTED and re-dispatched. Measured against queued_at (when the batch was
+# dispatched), NOT ingest_time, so it never reverts a live batch of
+# long-ingested alerts. Keep it comfortably above the real max batch runtime
+# (a full batch runs single-digit minutes) and below any need for fast recovery.
+CROSSMATCH_BATCH_STUCK_SECONDS = int(
+    os.getenv('CROSSMATCH_BATCH_STUCK_SECONDS', '3600')
+)
 
 # Resilience for transient remote HATS catalog reads (data.lsdb.io drops
 # connections mid parquet read -> aiohttp ServerDisconnectedError). Total read
