@@ -1,4 +1,4 @@
-"""U4 / R5, R4: the 0003 data migration backfills healpix_ipix for existing rows
+"""U4 / R5, R4: the 0004 data migration backfills healpix_ipix for existing rows
 from their stored coordinates, leaves reliability untouched, is safe to re-run,
 and reverses as a no-op."""
 
@@ -11,7 +11,7 @@ from core.healpix import radec_to_ipix
 from core.models import Alert
 from tests.factories import AlertFactory
 
-_BACKFILL = importlib.import_module("core.migrations.0003_backfill_healpix_ipix")
+_BACKFILL = importlib.import_module("core.migrations.0004_backfill_healpix_ipix")
 
 
 @pytest.mark.django_db

@@ -54,7 +54,7 @@ def noop_reverse(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0002_add_read_model_columns'),
+        ('core', '0003_add_read_model_columns'),
     ]
 
     operations = [
