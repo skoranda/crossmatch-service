@@ -170,6 +170,7 @@ INSTALLED_APPS = [
     'project',
     'core',
     'tasks',
+    'api',
 ]
 
 MIDDLEWARE = [
@@ -354,6 +355,33 @@ DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 ######################################################################
 # Webserver config
 #
+# HTTP entry point (read-model API + admin). Only the web workload
+# (entrypoints/run_web.sh -> gunicorn project.wsgi:application) uses these; the
+# Celery workers and ingest consumers never serve HTTP.
+ROOT_URLCONF = 'project.urls'
+WSGI_APPLICATION = 'project.wsgi.application'
+# DJANGO_ALLOWED_HOSTS is a comma-separated list, supplied to the web pod by the
+# gitops web.env helper (from .Values.ingress.host). The default includes the
+# DEV host so a bare local/dev boot serves without a DisallowedHost 400.
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get(
+        'DJANGO_ALLOWED_HOSTS', 'crossmatch-dev.scimma.org,localhost,127.0.0.1'
+    ).split(',')
+    if h.strip()
+]
+
+# Recent-crossmatch API server-side ceilings. The endpoint is unauthenticated on
+# DEV, so these bound the work any single request can trigger: MAX_OBJECTS caps
+# the number of objects returned (a caller limit only narrows below it), and
+# MAX_WINDOW_HOURS rejects a window span larger than this.
+RECENT_CROSSMATCH_MAX_OBJECTS = int(
+    os.environ.get('RECENT_CROSSMATCH_MAX_OBJECTS', '500')
+)
+RECENT_CROSSMATCH_MAX_WINDOW_HOURS = int(
+    os.environ.get('RECENT_CROSSMATCH_MAX_WINDOW_HOURS', '168')
+)
+
 # Password validation
 # https://docs.djangoproject.com/en/dev/ref/settings/#auth-password-validators
 

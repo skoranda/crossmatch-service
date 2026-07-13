@@ -66,3 +66,46 @@ def build_catalog_payload(values, payload_columns):
         col.lower(): _to_json_scalar(values.get(col))
         for col in payload_columns
     }
+
+
+def build_published_payload(
+    dia_object_id,
+    source_ra_deg,
+    source_dec_deg,
+    catalog_name,
+    catalog_source_id,
+    separation_arcsec,
+    catalog_payload,
+):
+    """Build the per-match payload published over Hopskotch.
+
+    Single source of truth for the published payload shape, called by both the
+    crossmatch publish path (``tasks/crossmatch.py``) and the read-model API's
+    ``full`` detail level, so the two cannot drift. The ``ra``/``dec`` are the
+    matched catalog-source coordinates (not the alert object's position); the
+    per-catalog columns live nested under ``catalog_payload``.
+
+    Args:
+        dia_object_id: The alert's ``diaObjectId`` (coerced to int64).
+        source_ra_deg: Matched catalog source right ascension in degrees.
+        source_dec_deg: Matched catalog source declination in degrees.
+        catalog_name: Catalog the match came from (e.g. ``gaia_dr3``).
+        catalog_source_id: Source identifier in that catalog.
+        separation_arcsec: Angular separation between alert and source, arcsec.
+        catalog_payload: The catalog-specific payload dict (see
+            :func:`build_catalog_payload`).
+
+    Returns:
+        A JSON-native dict with stable keys ``diaObjectId``, ``ra``, ``dec``,
+        ``catalog_name``, ``catalog_source_id``, ``separation_arcsec``,
+        ``catalog_payload``.
+    """
+    return {
+        'diaObjectId': int(dia_object_id),
+        'ra': float(source_ra_deg),
+        'dec': float(source_dec_deg),
+        'catalog_name': catalog_name,
+        'catalog_source_id': catalog_source_id,
+        'separation_arcsec': float(separation_arcsec),
+        'catalog_payload': catalog_payload,
+    }

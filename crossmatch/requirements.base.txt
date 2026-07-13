@@ -5,6 +5,11 @@ django_celery_results
 django-celery-beat
 django-tables2
 flower
+# WSGI server for the read-model HTTP API web workload (entrypoints/run_web.sh).
+# Server-only: not in the Dask (de)serialization path, so no cluster-version
+# alignment is required (unlike numpy/pandas/dask). Pinned per the
+# dependency-pin convention (docs/solutions/conventions/).
+gunicorn==23.0.0
 hop-client
 httpx
 confluent_kafka

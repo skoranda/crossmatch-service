@@ -197,6 +197,8 @@ grpcio-status==1.80.0
     # via
     #   google-api-core
     #   google-cloud-pubsub
+gunicorn==23.0.0
+    # via -r requirements.base.txt
 h11==0.16.0
     # via httpcore
 hats==0.9.0
@@ -310,6 +312,7 @@ packaging==26.2
     #   db-dtypes
     #   distributed
     #   google-cloud-bigquery
+    #   gunicorn
     #   kombu
     #   marshmallow
 pandas==2.3.3
