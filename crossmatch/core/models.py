@@ -61,6 +61,7 @@ class Alert(models.Model):
             models.Index(fields=['reliability'], name='core_alert_reliability_idx'),
             models.Index(fields=['event_time'], name='core_alert_event_time_idx'),
             models.Index(fields=['healpix_ipix'], name='core_alert_healpix_ipix_idx'),
+            models.Index(fields=['ingest_time'], name='core_alert_ingest_time_idx'),
         ]
 
 

@@ -36,4 +36,5 @@ def test_read_model_indexes_present():
         "core_alert_reliability_idx",
         "core_alert_event_time_idx",
         "core_alert_healpix_ipix_idx",
+        "core_alert_ingest_time_idx",
     } <= index_names

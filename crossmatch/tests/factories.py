@@ -58,6 +58,16 @@ class NotificationFactory(DjangoModelFactory):
     state = Notification.State.PENDING
 
 
+def set_ingest_time(alert, when):
+    """Force an Alert's ``ingest_time`` to ``when``.
+
+    ``Alert.ingest_time`` is ``auto_now_add`` so Django ignores any value passed
+    at construction; tests that need to pin it use an explicit UPDATE afterward,
+    mirroring how production stamps it on ingest.
+    """
+    Alert.objects.filter(pk=alert.pk).update(ingest_time=when)
+
+
 def make_alert_with_notifications(status, notification_states, destination="hopskotch"):
     """Build one Alert at ``status`` plus one Notification per entry in
     ``notification_states`` (each a Notification.State), all on ``destination``.

@@ -5,7 +5,7 @@ from django.conf import settings
 from django.db import transaction
 from core.models import Alert, CatalogMatch, Notification
 from matching.catalog import crossmatch_alerts
-from matching.payload import build_catalog_payload
+from matching.payload import build_catalog_payload, build_published_payload
 from core.log import get_logger
 from core.metrics import CROSSMATCH_BATCHES, CROSSMATCH_MATCHES
 logger = get_logger(__name__)
@@ -134,15 +134,9 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
                     notification = Notification(
                         alert_id=dia_id,
                         destination='hopskotch',
-                        payload={
-                            'diaObjectId': int(dia_id),
-                            'ra': float(ra),
-                            'dec': float(dec),
-                            'catalog_name': catalog_name,
-                            'catalog_source_id': src_id,
-                            'separation_arcsec': float(dist),
-                            'catalog_payload': catalog_payload,
-                        },
+                        payload=build_published_payload(
+                            dia_id, ra, dec, catalog_name, src_id, dist, catalog_payload
+                        ),
                     )
                 except Exception:
                     logger.exception('Skipping unbuildable match row',
