@@ -26,6 +26,10 @@ from core.log import get_logger
 from core.models import Alert, CatalogMatch
 from matching.payload import build_published_payload
 
+# InvalidQuery is defined in api.errors so the cursor codec (api.pagination) can
+# raise it without a circular import; re-exported here for existing importers.
+from api.errors import InvalidQuery
+
 logger = get_logger(__name__)
 
 DETAIL_LEVELS = ('ids', 'position', 'matches', 'full')
@@ -34,9 +38,7 @@ DEFAULT_DETAIL = 'matches'
 DEFAULT_TIME_FIELD = 'ingest_time'
 DEFAULT_WINDOW_HOURS = 12
 
-
-class InvalidQuery(ValueError):
-    """A request parameter is invalid; the view maps this to HTTP 400."""
+__all__ = ['InvalidQuery', 'recent_crossmatches']
 
 
 def recent_crossmatches(
