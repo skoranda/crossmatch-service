@@ -1,19 +1,21 @@
-"""U2 / AE1-AE5: the recent-crossmatch query/service layer.
+"""U3 / AE1-AE6: the recent-crossmatch query/service layer.
 
 Covers the window filter on both timestamp fields, matches-only inner join,
-grouping by object, the four detail levels, current-match_version dedup, and the
-hard server-side object cap. ``ingest_time`` is ``auto_now_add`` so it cannot be
-set at construction; tests that pin it use an explicit ``.update()`` after the
-factory builds the row (mirroring how production stamps it on ingest).
+grouping by object, the four detail levels, current-match_version dedup, and
+keyset (cursor) paging: per-page size clamping, following ``next_cursor`` to
+exhaustion, tie handling across a page boundary, and decoded-cursor
+re-validation. ``ingest_time`` is ``auto_now_add`` so it cannot be set at
+construction; tests that pin it use an explicit ``.update()`` after the factory
+builds the row (mirroring how production stamps it on ingest).
 """
 
 from datetime import timedelta
 
 import pytest
-from django.conf import settings
 from django.test import override_settings
 from django.utils import timezone
 
+from api.pagination import Cursor, encode_cursor
 from api.service import InvalidQuery, recent_crossmatches
 from tests.factories import AlertFactory, CatalogMatchFactory, set_ingest_time
 
@@ -190,31 +192,116 @@ def test_empty_window_returns_no_objects():
     assert result['objects'] == []
 
 
-@pytest.mark.django_db
-def test_limit_clamps_to_max_objects():
-    """A caller limit above the hard ceiling is clamped down to MAX_OBJECTS."""
-    now = timezone.now()
-    for _ in range(3):
-        alert = AlertFactory(event_time=now)
+def _seed_matched_objects(count, base_time, spacing=timedelta(minutes=1)):
+    """Create ``count`` matched alerts at strictly-decreasing event_times.
+
+    Returns the diaObjectIds in newest-first order (the order a walk should
+    reconstruct).
+    """
+    ids_newest_first = []
+    for i in range(count):
+        alert = AlertFactory(event_time=base_time - i * spacing)
         CatalogMatchFactory(alert=alert)
+        ids_newest_first.append(alert.lsst_diaObject_diaObjectId)
+    return ids_newest_first
 
-    result = recent_crossmatches(
-        time_field='event_time', detail='ids', limit=settings.RECENT_CROSSMATCH_MAX_OBJECTS + 1000,
-    )
 
-    assert result["count"] <= settings.RECENT_CROSSMATCH_MAX_OBJECTS
+def _walk(page_size, **kwargs):
+    """Follow next_cursor to exhaustion; return the concatenated diaObjectIds."""
+    collected = []
+    cursor = None
+    pages = 0
+    while True:
+        result = recent_crossmatches(page_size=page_size, cursor=cursor, **kwargs)
+        collected.extend(o['diaObjectId'] for o in result['objects'])
+        cursor = result['next_cursor']
+        pages += 1
+        if cursor is None:
+            break
+        assert pages < 1000, 'walk did not terminate'
+    return collected
 
 
 @pytest.mark.django_db
-def test_limit_narrows_object_count():
+def test_first_page_echoes_page_size_and_emits_cursor():
+    """AE1: no cursor, more than a page of objects -> a full page plus a cursor."""
     now = timezone.now()
-    for _ in range(3):
-        alert = AlertFactory(event_time=now)
-        CatalogMatchFactory(alert=alert)
+    _seed_matched_objects(5, now)
 
-    result = recent_crossmatches(time_field='event_time', detail='ids', limit=2)
+    result = recent_crossmatches(time_field='event_time', detail='ids', page_size=2)
 
+    assert len(result['objects']) == 2
+    assert result['page_size'] == 2
     assert result['count'] == 2
+    assert result['next_cursor'] is not None
+
+
+@pytest.mark.django_db
+def test_default_page_size_used_when_omitted():
+    now = timezone.now()
+    _seed_matched_objects(3, now)
+
+    result = recent_crossmatches(time_field='event_time', detail='ids')
+
+    assert result['page_size'] == 1000  # RECENT_CROSSMATCH_DEFAULT_PAGE_SIZE
+    # Default (1000) exceeds the 3 seeded objects, so all three come back at once.
+    assert result['count'] == 3
+    assert result['next_cursor'] is None
+
+
+@pytest.mark.django_db
+def test_follow_cursor_to_exhaustion_covers_set_once_in_order():
+    """AE2: the union of pages equals the full distinct set, each id once, in
+    newest-first order; the final page has next_cursor None."""
+    now = timezone.now()
+    expected = _seed_matched_objects(7, now)
+
+    walked = _walk(page_size=2, time_field='event_time', detail='ids')
+
+    assert walked == expected  # order preserved, no dupes, no skips
+
+
+@pytest.mark.django_db
+def test_tie_on_time_field_split_across_page_boundary():
+    """AE2 tie case: objects sharing one event_time split across a page boundary
+    are neither dropped nor duplicated (exercises the diaObjectId tiebreaker)."""
+    now = timezone.now()
+    shared = now - timedelta(minutes=5)
+    # Four objects at the SAME event_time, plus one newer and one older.
+    newer = AlertFactory(event_time=now)
+    CatalogMatchFactory(alert=newer)
+    tied = []
+    for _ in range(4):
+        a = AlertFactory(event_time=shared)
+        CatalogMatchFactory(alert=a)
+        tied.append(a.lsst_diaObject_diaObjectId)
+    older = AlertFactory(event_time=now - timedelta(minutes=10))
+    CatalogMatchFactory(alert=older)
+
+    walked = _walk(page_size=2, time_field='event_time', detail='ids')
+
+    # The four tied ids sort by diaObjectId ASC among themselves.
+    expected = (
+        [newer.lsst_diaObject_diaObjectId]
+        + sorted(tied)
+        + [older.lsst_diaObject_diaObjectId]
+    )
+    assert walked == expected
+    assert len(walked) == len(set(walked)) == 6
+
+
+@override_settings(RECENT_CROSSMATCH_MAX_PAGE_SIZE=2)
+@pytest.mark.django_db
+def test_page_size_above_max_clamps_not_rejects():
+    """AE3: a page_size above the operator max is served at the max, not 400."""
+    now = timezone.now()
+    _seed_matched_objects(3, now)
+
+    result = recent_crossmatches(time_field='event_time', detail='ids', page_size=100)
+
+    assert result['page_size'] == 2
+    assert result['count'] == 2
+    assert result['next_cursor'] is not None
 
 
 @pytest.mark.django_db
@@ -230,9 +317,11 @@ def test_invalid_time_field_raises():
 
 
 @pytest.mark.django_db
-def test_non_positive_limit_raises():
+def test_non_positive_page_size_raises():
     with pytest.raises(InvalidQuery):
-        recent_crossmatches(limit=0)
+        recent_crossmatches(page_size=0)
+    with pytest.raises(InvalidQuery):
+        recent_crossmatches(page_size=-5)
 
 
 @pytest.mark.django_db
@@ -270,16 +359,136 @@ def test_full_detail_skips_row_with_null_source_coords():
     assert [m['catalog_source_id'] for m in matches] == ['good']
 
 
-@override_settings(RECENT_CROSSMATCH_MAX_OBJECTS=2)
 @pytest.mark.django_db
-def test_ceiling_read_live_from_settings():
-    """The object ceiling is read live from settings (override_settings works
-    because the value is not cached at import)."""
+def test_empty_window_has_null_cursor():
+    """AE4: an empty window -> no objects, next_cursor null, count 0."""
+    result = recent_crossmatches(time_field='event_time', detail='matches', page_size=5)
+    assert result['count'] == 0
+    assert result['objects'] == []
+    assert result['next_cursor'] is None
+
+
+@pytest.mark.django_db
+def test_cursor_resumes_same_query_with_derived_context():
+    """A cursor built for a query resumes that query when start/end/time_field/
+    detail are omitted (the service derives them from the cursor)."""
     now = timezone.now()
-    for _ in range(3):
-        alert = AlertFactory(event_time=now)
-        CatalogMatchFactory(alert=alert)
+    expected = _seed_matched_objects(4, now)
 
-    result = recent_crossmatches(time_field='event_time', detail='ids')
+    first = recent_crossmatches(time_field='event_time', detail='ids', page_size=2)
+    # Second page passes ONLY the cursor + page_size (no window/time_field/detail).
+    second = recent_crossmatches(page_size=2, cursor=first['next_cursor'])
 
-    assert result['count'] == 2
+    assert second['time_field'] == 'event_time'
+    assert second['detail'] == 'ids'
+    got = [o['diaObjectId'] for o in first['objects']] + [
+        o['diaObjectId'] for o in second['objects']
+    ]
+    assert got == expected
+
+
+@pytest.mark.django_db
+def test_paging_preserves_nested_matches_across_detail_levels():
+    """R13: page size counts objects and each object still carries its nested
+    matches, for every detail level."""
+    now = timezone.now()
+    for i in range(3):
+        alert = AlertFactory(event_time=now - timedelta(minutes=i))
+        CatalogMatchFactory(alert=alert, catalog_name='gaia_dr3', catalog_source_id=str(i))
+
+    for detail in ('position', 'matches', 'full'):
+        walked_objs = []
+        cursor = None
+        while True:
+            result = recent_crossmatches(
+                time_field='event_time', detail=detail, page_size=1, cursor=cursor
+            )
+            assert result['count'] == len(result['objects']) <= 1
+            walked_objs.extend(result['objects'])
+            cursor = result['next_cursor']
+            if cursor is None:
+                break
+        assert len(walked_objs) == 3
+        if detail in ('matches', 'full'):
+            assert all('matches' in o for o in walked_objs)
+
+
+@pytest.mark.django_db
+def test_decoded_cursor_time_field_revalidated_against_allowlist():
+    """Security (KTD3): an unsigned cursor carrying an out-of-allowlist time_field
+    is rejected before the keyset predicate interpolates it into the ORM."""
+    now = timezone.now()
+    bad = encode_cursor(
+        Cursor(
+            time_field_value=now,
+            dia_object_id=1,
+            start=now - timedelta(hours=1),
+            end=now,
+            time_field='created_at; DROP',  # not in TIME_FIELDS
+            detail='ids',
+        )
+    )
+    with pytest.raises(InvalidQuery):
+        recent_crossmatches(cursor=bad)
+
+
+@override_settings(RECENT_CROSSMATCH_MAX_WINDOW_HOURS=1)
+@pytest.mark.django_db
+def test_decoded_cursor_window_span_revalidated():
+    """Security (KTD3): a cursor pinning an over-span window is rejected."""
+    now = timezone.now()
+    bad = encode_cursor(
+        Cursor(
+            time_field_value=now,
+            dia_object_id=1,
+            start=now - timedelta(days=30),
+            end=now,
+            time_field='event_time',
+            detail='ids',
+        )
+    )
+    with pytest.raises(InvalidQuery):
+        recent_crossmatches(cursor=bad)
+
+
+@pytest.mark.django_db
+def test_cursor_conflict_with_explicit_param_rejected():
+    """AE5: presenting a cursor with a conflicting explicit param -> InvalidQuery."""
+    now = timezone.now()
+    _seed_matched_objects(3, now)
+    first = recent_crossmatches(time_field='event_time', detail='ids', page_size=1)
+
+    with pytest.raises(InvalidQuery):
+        recent_crossmatches(
+            cursor=first['next_cursor'], time_field='ingest_time'  # conflicts
+        )
+
+
+@pytest.mark.django_db
+def test_open_event_time_window_walk_is_read_committed():
+    """R11 carve-out: on an open event_time window, a mid-walk insert whose
+    event_time falls BELOW the current cursor is read-committed (may appear); the
+    walk stays duplicate-free either way. This characterizes, not forbids, the
+    late arrival."""
+    now = timezone.now()
+    first_batch = _seed_matched_objects(3, now)  # newest-first
+
+    # Page 1 (newest). Then insert an older alert BELOW where the cursor now sits.
+    p1 = recent_crossmatches(time_field='event_time', detail='ids', page_size=2)
+    seen = [o['diaObjectId'] for o in p1['objects']]
+
+    late = AlertFactory(event_time=now - timedelta(hours=1))  # below the cursor
+    CatalogMatchFactory(alert=late)
+
+    # Continue the walk.
+    cursor = p1['next_cursor']
+    while cursor is not None:
+        page = recent_crossmatches(page_size=2, cursor=cursor)
+        seen.extend(o['diaObjectId'] for o in page['objects'])
+        cursor = page['next_cursor']
+
+    # Duplicate-free is the hard guarantee; the original set is fully covered.
+    assert len(seen) == len(set(seen))
+    assert set(first_batch).issubset(set(seen))
+    # The late arrival being included is the read-committed behavior (not asserted
+    # as required); it must never cause a duplicate, which the check above covers.
