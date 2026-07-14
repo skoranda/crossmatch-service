@@ -40,8 +40,8 @@ def _parse_timestamp(raw: str, field: str) -> datetime:
     return parsed
 
 
-def _parse_limit(raw: str) -> int:
-    """Parse the ``limit`` query param as a positive int.
+def _parse_page_size(raw: str) -> int:
+    """Parse the ``page_size`` query param as an int.
 
     Raises:
         InvalidQuery: If the value is not an integer (non-positive values are
@@ -50,20 +50,24 @@ def _parse_limit(raw: str) -> int:
     try:
         return int(raw)
     except (TypeError, ValueError):
-        raise InvalidQuery(f"limit is not an integer: {raw!r}")
+        raise InvalidQuery(f"page_size is not an integer: {raw!r}")
 
 
 def recent_crossmatches_view(request: HttpRequest) -> JsonResponse:
-    """GET the crossmatches for objects with alerts in a recent time window.
+    """GET one keyset page of crossmatches for objects with recent alerts.
 
     Query params (all optional): ``start``/``end`` (ISO-8601 UTC; default the
     last 12h), ``time_field`` (``ingest_time`` default | ``event_time``),
     ``detail`` (``ids`` | ``position`` | ``matches`` default | ``full``),
-    ``limit`` (positive int; clamped to the server-side ceiling).
+    ``page_size`` (positive int; clamped to the operator maximum), and ``cursor``
+    (an opaque ``next_cursor`` from a prior page). A ``cursor`` pins
+    ``start``/``end``/``time_field``/``detail``; supplying any of those with a
+    conflicting value is a 400. Results carry a top-level ``next_cursor`` (null
+    when the window is exhausted); follow it to page the whole window.
 
     Returns:
-        A ``JsonResponse``: 200 with the grouped result, 400 with a JSON error
-        body on any invalid parameter, or 405 for a non-GET method.
+        A ``JsonResponse``: 200 with the page, 400 with a JSON error body on any
+        invalid parameter or cursor conflict, or 405 for a non-GET method.
     """
     if request.method != 'GET':
         return JsonResponse({'error': 'method not allowed'}, status=405)
@@ -79,8 +83,10 @@ def recent_crossmatches_view(request: HttpRequest) -> JsonResponse:
             kwargs['time_field'] = params['time_field']
         if 'detail' in params:
             kwargs['detail'] = params['detail']
-        if 'limit' in params:
-            kwargs['limit'] = _parse_limit(params['limit'])
+        if 'page_size' in params:
+            kwargs['page_size'] = _parse_page_size(params['page_size'])
+        if 'cursor' in params:
+            kwargs['cursor'] = params['cursor']
 
         result = recent_crossmatches(**kwargs)
     except InvalidQuery as exc:

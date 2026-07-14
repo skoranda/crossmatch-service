@@ -372,11 +372,19 @@ ALLOWED_HOSTS = [
 ]
 
 # Recent-crossmatch API server-side ceilings. The endpoint is unauthenticated on
-# DEV, so these bound the work any single request can trigger: MAX_OBJECTS caps
-# the number of objects returned (a caller limit only narrows below it), and
-# MAX_WINDOW_HOURS rejects a window span larger than this.
-RECENT_CROSSMATCH_MAX_OBJECTS = int(
-    os.environ.get('RECENT_CROSSMATCH_MAX_OBJECTS', '500')
+# DEV, so these bound the work any single request can trigger. Results are keyset
+# (cursor) paged: MAX_PAGE_SIZE caps the objects one request/page may return (a
+# caller page_size only narrows below it, and an over-max page_size clamps down
+# rather than being rejected), DEFAULT_PAGE_SIZE is the page size used when the
+# caller omits one, and MAX_WINDOW_HOURS rejects a window span larger than this.
+# There is intentionally no total cap on how many objects a window can be paged
+# through -- per-page work is bounded, total iteration is not (rate limiting is
+# deferred with the accepted public-on-DEV posture).
+RECENT_CROSSMATCH_DEFAULT_PAGE_SIZE = int(
+    os.environ.get('RECENT_CROSSMATCH_DEFAULT_PAGE_SIZE', '1000')
+)
+RECENT_CROSSMATCH_MAX_PAGE_SIZE = int(
+    os.environ.get('RECENT_CROSSMATCH_MAX_PAGE_SIZE', '10000')
 )
 RECENT_CROSSMATCH_MAX_WINDOW_HOURS = int(
     os.environ.get('RECENT_CROSSMATCH_MAX_WINDOW_HOURS', '168')

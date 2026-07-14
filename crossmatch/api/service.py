@@ -19,12 +19,17 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from django.conf import settings
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from core.log import get_logger
 from core.models import Alert, CatalogMatch
 from matching.payload import build_published_payload
+
+# InvalidQuery is defined in api.errors so the cursor codec (api.pagination) can
+# raise it without a circular import; re-exported here for existing importers.
+from api.errors import InvalidQuery
+from api.pagination import Cursor, decode_cursor, encode_cursor, ensure_no_conflict
 
 logger = get_logger(__name__)
 
@@ -34,40 +39,73 @@ DEFAULT_DETAIL = 'matches'
 DEFAULT_TIME_FIELD = 'ingest_time'
 DEFAULT_WINDOW_HOURS = 12
 
-
-class InvalidQuery(ValueError):
-    """A request parameter is invalid; the view maps this to HTTP 400."""
+__all__ = ['InvalidQuery', 'recent_crossmatches']
 
 
 def recent_crossmatches(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
-    time_field: str = DEFAULT_TIME_FIELD,
-    detail: str = DEFAULT_DETAIL,
-    limit: int | None = None,
+    time_field: str | None = None,
+    detail: str | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
-    """Return recent crossmatches grouped by object.
+    """Return one keyset page of recent crossmatches grouped by object.
+
+    Results are ordered newest-first by ``time_field`` with ``diaObjectId`` as a
+    unique tiebreaker, and paged by opaque cursor: a page carries a
+    ``next_cursor`` the caller passes back to resume strictly after the last row.
+    Following ``next_cursor`` to exhaustion returns every distinct matched
+    ``diaObjectId`` in the window exactly once. There is no total-object cap; only
+    per-page size and window span are bounded.
 
     Args:
         start: Window start (aware datetime). Defaults to ``end`` minus 12h.
-        end: Window end (aware datetime). Defaults to now.
+            Ignored (and, if it conflicts, rejected) when ``cursor`` is given.
+        end: Window end (aware datetime). Defaults to now. Same cursor rule.
         time_field: Which alert timestamp the window filters on — ``ingest_time``
-            (default, arrival time) or ``event_time`` (observation time).
-        detail: Payload detail level — ``ids`` | ``position`` | ``matches`` |
-            ``full`` (cumulative).
-        limit: Optional caller cap on the number of objects; clamped to the hard
-            server-side ceiling. Must be positive when given.
+            (default, arrival time) or ``event_time`` (observation time). Same
+            cursor rule.
+        detail: Payload detail level — ``ids`` | ``position`` | ``matches``
+            (default) | ``full`` (cumulative). Same cursor rule.
+        page_size: Caller page size; clamped down to
+            ``RECENT_CROSSMATCH_MAX_PAGE_SIZE``. Defaults to
+            ``RECENT_CROSSMATCH_DEFAULT_PAGE_SIZE``. Must be positive when given.
+        cursor: Opaque ``next_cursor`` from a prior page. It pins
+            ``start``/``end``/``time_field``/``detail``; supplying any of those
+            with a conflicting value is an error. ``page_size`` is not pinned.
 
     Returns:
-        A JSON-native dict with the resolved query metadata and an ``objects``
-        list, one entry per ``diaObjectId`` (matches-only).
+        A JSON-native dict with the resolved query metadata, the effective
+        ``page_size``, a per-page ``count``, a ``next_cursor`` (null when the
+        window is exhausted), and an ``objects`` list, one entry per
+        ``diaObjectId`` (matches-only).
 
     Raises:
-        InvalidQuery: On an unknown ``detail``/``time_field``, a non-positive
-            ``limit``, an ``end`` before ``start``, or a window span beyond the
-            configured maximum.
+        InvalidQuery: On an unknown/decoded-invalid ``detail``/``time_field``, a
+            non-positive ``page_size``, a malformed ``cursor``, a cursor whose
+            pinned context conflicts with an explicit param, an ``end`` before
+            ``start``, or a window span beyond the configured maximum.
     """
+    # A cursor pins the query context. Decode it first, reject any conflicting
+    # explicit param (KTD3), then derive the pinned values. The derived values
+    # are then run through the SAME allowlist/window-span validation as
+    # directly-supplied params below, so an unsigned (client-constructable)
+    # cursor cannot smuggle a bad time_field into the ORM field interpolation.
+    # `cursor is not None` (not truthiness): an explicit empty `?cursor=` is a
+    # malformed cursor and must reach decode_cursor's 400, not be served as page 1.
+    decoded = decode_cursor(cursor) if cursor is not None else None
+    if decoded is not None:
+        ensure_no_conflict(
+            decoded, start=start, end=end, time_field=time_field, detail=detail,
+        )
+        start, end = decoded.start, decoded.end
+        time_field, detail = decoded.time_field, decoded.detail
+
+    time_field = time_field if time_field is not None else DEFAULT_TIME_FIELD
+    detail = detail if detail is not None else DEFAULT_DETAIL
+
     if detail not in DETAIL_LEVELS:
         raise InvalidQuery(
             f"detail must be one of {DETAIL_LEVELS}, got {detail!r}"
@@ -76,17 +114,23 @@ def recent_crossmatches(
         raise InvalidQuery(
             f"time_field must be one of {TIME_FIELDS}, got {time_field!r}"
         )
-    if limit is not None and limit <= 0:
-        raise InvalidQuery("limit must be a positive integer")
+    if page_size is not None and page_size <= 0:
+        raise InvalidQuery("page_size must be a positive integer")
 
-    # Hard server-side ceilings, read live (matching the repo convention of
-    # reading settings at call time, so @override_settings works in tests). The
-    # endpoint is unauthenticated on DEV with rate limiting deferred, so these
-    # bound the work one request can cause (KTD7): a caller ``limit`` only
-    # narrows below the object ceiling, and a window span beyond the hour
-    # ceiling is rejected.
-    max_objects = int(settings.RECENT_CROSSMATCH_MAX_OBJECTS)
+    # Per-page and window-span ceilings, read live (matching the repo convention
+    # of reading settings at call time, so @override_settings works in tests).
+    # The endpoint is unauthenticated on DEV with rate limiting deferred; these
+    # bound the work one request/page can cause. There is intentionally no total
+    # cap on how many objects a window can be paged through.
+    max_page_size = int(settings.RECENT_CROSSMATCH_MAX_PAGE_SIZE)
+    default_page_size = int(settings.RECENT_CROSSMATCH_DEFAULT_PAGE_SIZE)
     max_window_hours = int(settings.RECENT_CROSSMATCH_MAX_WINDOW_HOURS)
+
+    # Clamp both the caller value and the default to the max, so MAX_PAGE_SIZE is
+    # a real per-request ceiling even if an operator sets DEFAULT above MAX.
+    effective_page_size = min(
+        default_page_size if page_size is None else page_size, max_page_size
+    )
 
     end = end or timezone.now()
     start = start or (end - timedelta(hours=DEFAULT_WINDOW_HOURS))
@@ -97,47 +141,75 @@ def recent_crossmatches(
             f"window span exceeds the maximum of {max_window_hours} hours"
         )
 
-    cap = max_objects if limit is None else min(limit, max_objects)
-
     window = {f'{time_field}__gte': start, f'{time_field}__lt': end}
 
     # Objects (one Alert per diaObjectId, since diaObjectId is unique) that have
-    # at least one match, in the window, newest first, capped. An Exists()
-    # semi-join expresses "has a match" without the inner-join fan-out (one row
-    # per match) that would otherwise need a GROUP BY to collapse, so the
-    # planner can serve the ORDER BY + LIMIT straight off the timestamp index.
-    # ra/dec are pulled in the same query (functionally dependent on the unique
-    # object id) so position/matches/full need no second round trip. The
-    # diaObjectId tiebreaker makes the cap truncation deterministic when several
-    # objects share a timestamp at the cap boundary.
+    # at least one match, in the window, newest first. An Exists() semi-join
+    # expresses "has a match" without the inner-join fan-out (one row per match)
+    # that would otherwise need a GROUP BY to collapse, so the planner can serve
+    # the ORDER BY + LIMIT straight off the timestamp index. ra/dec are pulled in
+    # the same query (functionally dependent on the unique object id) so
+    # position/matches/full need no second round trip. The selected time_field is
+    # projected too (as the row's t0) so the last kept row can seed next_cursor.
     has_match = CatalogMatch.objects.filter(
         alert_id=OuterRef('lsst_diaObject_diaObjectId')
     )
-    object_rows = list(
-        Alert.objects.filter(**window)
-        .filter(Exists(has_match))
-        .order_by(f'-{time_field}', 'lsst_diaObject_diaObjectId')
-        .values('lsst_diaObject_diaObjectId', 'ra_deg', 'dec_deg')[:cap]
+    query = Alert.objects.filter(**window).filter(Exists(has_match))
+
+    if decoded is not None:
+        # Resume strictly after the cursor's (t0, id0) in the descending
+        # (time_field DESC, diaObjectId ASC) order: an earlier timestamp, or the
+        # same timestamp with a larger id (the tiebreaker arm).
+        query = query.filter(
+            Q(**{f'{time_field}__lt': decoded.time_field_value})
+            | Q(**{
+                time_field: decoded.time_field_value,
+                'lsst_diaObject_diaObjectId__gt': decoded.dia_object_id,
+            })
+        )
+
+    # Fetch one extra row to detect whether a further page exists.
+    fetched = list(
+        query.order_by(f'-{time_field}', 'lsst_diaObject_diaObjectId')
+        .values('lsst_diaObject_diaObjectId', 'ra_deg', 'dec_deg', time_field)
+        [: effective_page_size + 1]
     )
+    has_next = len(fetched) > effective_page_size
+    object_rows = fetched[:effective_page_size]
 
+    next_cursor = None
+    if has_next and object_rows:
+        last = object_rows[-1]
+        next_cursor = encode_cursor(
+            Cursor(
+                time_field_value=last[time_field],
+                dia_object_id=int(last['lsst_diaObject_diaObjectId']),
+                start=start,
+                end=end,
+                time_field=time_field,
+                detail=detail,
+            )
+        )
+
+    # Detail levels are cumulative (ids < position < matches/full); each guard
+    # skips work, not the shared return.
     objects = [{'diaObjectId': int(r['lsst_diaObject_diaObjectId'])} for r in object_rows]
-    if detail == 'ids' or not object_rows:
-        return _envelope(start, end, time_field, detail, objects)
 
-    for obj, row in zip(objects, object_rows):
-        ra, dec = row['ra_deg'], row['dec_deg']
-        obj['ra'] = float(ra) if ra is not None else None
-        obj['dec'] = float(dec) if dec is not None else None
+    if detail != 'ids' and object_rows:
+        for obj, row in zip(objects, object_rows):
+            ra, dec = row['ra_deg'], row['dec_deg']
+            obj['ra'] = float(ra) if ra is not None else None
+            obj['dec'] = float(dec) if dec is not None else None
 
-    if detail == 'position':
-        return _envelope(start, end, time_field, detail, objects)
+        if detail != 'position':
+            object_ids = [obj['diaObjectId'] for obj in objects]
+            matches_by_object = _load_matches(object_ids, detail)
+            for obj in objects:
+                obj['matches'] = matches_by_object.get(obj['diaObjectId'], [])
 
-    object_ids = [obj['diaObjectId'] for obj in objects]
-    matches_by_object = _load_matches(object_ids, detail)
-    for obj in objects:
-        obj['matches'] = matches_by_object.get(obj['diaObjectId'], [])
-
-    return _envelope(start, end, time_field, detail, objects)
+    return _envelope(
+        start, end, time_field, detail, objects, effective_page_size, next_cursor
+    )
 
 
 def _load_matches(object_ids, detail):
@@ -200,12 +272,21 @@ def _envelope(
     time_field: str,
     detail: str,
     objects: list[dict[str, Any]],
+    page_size: int,
+    next_cursor: str | None,
 ) -> dict[str, Any]:
-    """Wrap the projected objects with the resolved query metadata."""
+    """Wrap the projected objects with the resolved query metadata.
+
+    ``count`` is the number of objects on *this page*, not a whole-set total (no
+    cheap total exists under keyset paging). ``next_cursor`` is the opaque token
+    to fetch the next page, or ``None`` when the window is exhausted.
+    """
     return {
         'window': {'start': start.isoformat(), 'end': end.isoformat()},
         'time_field': time_field,
         'detail': detail,
+        'page_size': page_size,
         'count': len(objects),
+        'next_cursor': next_cursor,
         'objects': objects,
     }
