@@ -105,6 +105,14 @@ def test_malformed_cursor_returns_400(client):
 
 
 @pytest.mark.django_db
+def test_empty_cursor_returns_400(client):
+    """An explicit empty ?cursor= is malformed, not a silent page 1."""
+    resp = client.get(URL, {'cursor': ''})
+    assert resp.status_code == 400
+    assert 'error' in resp.json()
+
+
+@pytest.mark.django_db
 def test_window_span_over_max_returns_400(client):
     now = timezone.now()
     resp = client.get(

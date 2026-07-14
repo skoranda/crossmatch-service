@@ -93,7 +93,9 @@ def recent_crossmatches(
     # are then run through the SAME allowlist/window-span validation as
     # directly-supplied params below, so an unsigned (client-constructable)
     # cursor cannot smuggle a bad time_field into the ORM field interpolation.
-    decoded = decode_cursor(cursor) if cursor else None
+    # `cursor is not None` (not truthiness): an explicit empty `?cursor=` is a
+    # malformed cursor and must reach decode_cursor's 400, not be served as page 1.
+    decoded = decode_cursor(cursor) if cursor is not None else None
     if decoded is not None:
         ensure_no_conflict(
             decoded, start=start, end=end, time_field=time_field, detail=detail,
@@ -124,8 +126,10 @@ def recent_crossmatches(
     default_page_size = int(settings.RECENT_CROSSMATCH_DEFAULT_PAGE_SIZE)
     max_window_hours = int(settings.RECENT_CROSSMATCH_MAX_WINDOW_HOURS)
 
-    effective_page_size = (
-        default_page_size if page_size is None else min(page_size, max_page_size)
+    # Clamp both the caller value and the default to the max, so MAX_PAGE_SIZE is
+    # a real per-request ceiling even if an operator sets DEFAULT above MAX.
+    effective_page_size = min(
+        default_page_size if page_size is None else page_size, max_page_size
     )
 
     end = end or timezone.now()

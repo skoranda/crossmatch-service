@@ -113,6 +113,25 @@ def test_json_missing_required_key_raises():
         decode_cursor(token)
 
 
+def test_naive_cursor_timestamps_are_coerced_to_aware():
+    """A hand-crafted cursor carrying naive (offset-less) timestamps decodes to
+    aware UTC datetimes, so downstream `end < start` / ORM comparisons never mix
+    naive and aware (which would raise TypeError -> unhandled 500)."""
+    import base64
+    import json
+    payload = {'t': '2026-07-14T01:05:53', 'i': 1, 's': '2026-07-14T01:00:00',
+               'e': '2026-07-14T13:00:00', 'f': 'event_time', 'd': 'matches'}
+    raw = json.dumps(payload).encode('utf-8')
+    token = base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+
+    cursor = decode_cursor(token)
+
+    assert cursor.time_field_value.tzinfo is not None
+    assert cursor.start.tzinfo is not None
+    assert cursor.end.tzinfo is not None
+    assert cursor.start == datetime(2026, 7, 14, 1, 0, 0, tzinfo=timezone.utc)
+
+
 def test_json_unparseable_timestamp_raises():
     import base64
     import json

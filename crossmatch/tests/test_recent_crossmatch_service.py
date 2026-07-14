@@ -432,6 +432,49 @@ def test_decoded_cursor_time_field_revalidated_against_allowlist():
         recent_crossmatches(cursor=bad)
 
 
+@pytest.mark.django_db
+def test_decoded_cursor_detail_revalidated_against_allowlist():
+    """Security (KTD3): a cursor carrying an out-of-allowlist detail is rejected,
+    symmetric with the time_field re-validation."""
+    now = timezone.now()
+    bad = encode_cursor(
+        Cursor(
+            time_field_value=now,
+            dia_object_id=1,
+            start=now - timedelta(hours=1),
+            end=now,
+            time_field='event_time',
+            detail='everything',  # not in DETAIL_LEVELS
+        )
+    )
+    with pytest.raises(InvalidQuery):
+        recent_crossmatches(cursor=bad)
+
+
+@pytest.mark.django_db
+def test_empty_cursor_string_rejected_not_served_as_page_one():
+    """An explicit empty cursor is malformed -> InvalidQuery, not a silent page 1."""
+    with pytest.raises(InvalidQuery):
+        recent_crossmatches(cursor='')
+
+
+@pytest.mark.django_db
+def test_naive_timestamp_cursor_does_not_500():
+    """A crafted cursor with naive timestamps is handled (coerced to aware), not a
+    TypeError: the window comparison must not mix naive and aware datetimes."""
+    import base64
+    import json
+    payload = {'t': '2026-07-14T01:05:53', 'i': 1, 's': '2026-07-14T01:00:00',
+               'e': '2026-07-14T02:00:00', 'f': 'event_time', 'd': 'ids'}
+    raw = json.dumps(payload).encode('utf-8')
+    token = base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+
+    result = recent_crossmatches(cursor=token)  # must not raise TypeError
+
+    assert result['objects'] == []
+    assert result['next_cursor'] is None
+
+
 @override_settings(RECENT_CROSSMATCH_MAX_WINDOW_HOURS=1)
 @pytest.mark.django_db
 def test_decoded_cursor_window_span_revalidated():

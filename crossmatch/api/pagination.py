@@ -23,9 +23,10 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from django.utils.dateparse import parse_datetime
+from django.utils.timezone import is_naive, make_aware
 
 from api.errors import InvalidQuery
 
@@ -175,4 +176,10 @@ def _parse_dt(value: object) -> datetime:
     parsed = parse_datetime(value)
     if parsed is None:
         raise InvalidQuery(f'cursor timestamp is not valid ISO-8601: {value!r}')
+    # Server-issued cursors always carry aware UTC timestamps, but a hand-crafted
+    # cursor could omit the offset. Coerce naive -> UTC (as the view does for
+    # start/end) so downstream `end < start` comparisons and ORM filters never mix
+    # naive and aware datetimes (which would raise TypeError -> unhandled 500).
+    if is_naive(parsed):
+        parsed = make_aware(parsed, timezone.utc)
     return parsed
