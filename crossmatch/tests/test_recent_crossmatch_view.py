@@ -1,14 +1,16 @@
-"""U3 / R2, R3, R6, R7, R9, R11: the recent-crossmatch HTTP view.
+"""U4 / R1, R2, R4, R9: the recent-crossmatch HTTP view.
 
 Parameter parsing, defaults, 400s on bad input, the clamp-not-reject behavior
-for an oversized limit, and unauthenticated access on the DEV config. Query
-correctness is covered by test_recent_crossmatch_service; these tests exercise
-the HTTP adapter end-to-end through the URLconf.
+for an oversized page_size, cursor round-tripping through two GETs, cursor/param
+conflict -> 400, and unauthenticated access on the DEV config. Query correctness
+is covered by test_recent_crossmatch_service; these tests exercise the HTTP
+adapter end-to-end through the URLconf.
 """
 
 from datetime import timedelta
 
 import pytest
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -84,15 +86,22 @@ def test_unparseable_start_returns_400(client):
 
 
 @pytest.mark.django_db
-def test_non_integer_limit_returns_400(client):
-    resp = client.get(URL, {'limit': 'abc'})
+def test_non_integer_page_size_returns_400(client):
+    resp = client.get(URL, {'page_size': 'abc'})
     assert resp.status_code == 400
 
 
 @pytest.mark.django_db
-def test_zero_limit_returns_400(client):
-    resp = client.get(URL, {'limit': '0'})
+def test_zero_page_size_returns_400(client):
+    resp = client.get(URL, {'page_size': '0'})
     assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_malformed_cursor_returns_400(client):
+    resp = client.get(URL, {'cursor': 'not-a-real-cursor!!'})
+    assert resp.status_code == 400
+    assert 'error' in resp.json()
 
 
 @pytest.mark.django_db
@@ -106,16 +115,97 @@ def test_window_span_over_max_returns_400(client):
 
 
 @pytest.mark.django_db
-def test_oversized_limit_is_clamped_not_rejected(client):
+def test_first_page_returns_cursor_and_page_size(client):
+    """AE1: no cursor over a window with more than page_size objects -> a page
+    plus next_cursor, with page_size echoed in the body."""
     now = timezone.now()
-    alert = AlertFactory(event_time=now)
-    CatalogMatchFactory(alert=alert)
-    set_ingest_time(alert, now - timedelta(hours=1))
+    for i in range(2):
+        alert = AlertFactory(event_time=now)
+        CatalogMatchFactory(alert=alert)
+        set_ingest_time(alert, now - timedelta(hours=1) - timedelta(minutes=i))
 
-    resp = client.get(URL, {'limit': '100000'})
+    resp = client.get(URL, {'page_size': '1', 'detail': 'ids'})
 
     assert resp.status_code == 200
+    body = resp.json()
+    assert body['page_size'] == 1
+    assert body['count'] == 1
+    assert body['next_cursor'] is not None
+
+
+@pytest.mark.django_db
+def test_follow_cursor_across_two_gets_covers_set(client):
+    """AE2: following next_cursor through the real URLconf yields disjoint pages
+    that together cover the seeded set."""
+    now = timezone.now()
+    ids = []
+    for i in range(3):
+        alert = AlertFactory(event_time=now)
+        CatalogMatchFactory(alert=alert)
+        set_ingest_time(alert, now - timedelta(hours=1) - timedelta(minutes=i))
+        ids.append(alert.lsst_diaObject_diaObjectId)
+
+    seen = []
+    params = {'page_size': '1', 'detail': 'ids'}
+    for _ in range(10):
+        body = client.get(URL, params).json()
+        seen.extend(o['diaObjectId'] for o in body['objects'])
+        if body['next_cursor'] is None:
+            break
+        params = {'page_size': '1', 'cursor': body['next_cursor']}
+
+    assert sorted(seen) == sorted(ids)
+    assert len(seen) == len(set(seen))
+
+
+@pytest.mark.django_db
+def test_cursor_conflict_returns_400(client):
+    """AE5: a cursor plus a conflicting time_field -> 400 JSON error."""
+    now = timezone.now()
+    for i in range(2):
+        alert = AlertFactory(event_time=now - timedelta(minutes=i))
+        CatalogMatchFactory(alert=alert)
+
+    first = client.get(
+        URL, {'page_size': '1', 'detail': 'ids', 'time_field': 'event_time'}
+    ).json()
+
+    resp = client.get(
+        URL, {'cursor': first['next_cursor'], 'time_field': 'ingest_time'}
+    )
+    assert resp.status_code == 400
+    assert 'error' in resp.json()
+
+
+@override_settings(RECENT_CROSSMATCH_MAX_PAGE_SIZE=1)
+@pytest.mark.django_db
+def test_oversized_page_size_is_clamped_not_rejected(client):
+    now = timezone.now()
+    for i in range(2):
+        alert = AlertFactory(event_time=now)
+        CatalogMatchFactory(alert=alert)
+        set_ingest_time(alert, now - timedelta(hours=1) - timedelta(minutes=i))
+
+    resp = client.get(URL, {'page_size': '100000', 'detail': 'ids'})
+
+    assert resp.status_code == 200
+    assert resp.json()['page_size'] == 1
     assert resp.json()['count'] == 1
+
+
+@pytest.mark.django_db
+def test_stray_limit_param_is_ignored(client):
+    """The retired ``limit`` param no longer truncates the page."""
+    now = timezone.now()
+    for i in range(3):
+        alert = AlertFactory(event_time=now)
+        CatalogMatchFactory(alert=alert)
+        set_ingest_time(alert, now - timedelta(hours=1) - timedelta(minutes=i))
+
+    resp = client.get(URL, {'limit': '1', 'detail': 'ids'})
+
+    assert resp.status_code == 200
+    assert resp.json()['count'] == 3  # limit ignored; default page size covers all
 
 
 @pytest.mark.django_db
