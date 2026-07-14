@@ -38,6 +38,11 @@ _KEY_END = 'e'
 _KEY_TIME_FIELD = 'f'
 _KEY_DETAIL = 'd'
 
+# Upper bound on an accepted cursor string. A real cursor encodes six short
+# fields (two/four ISO timestamps, an int64, two allowlisted keywords) and comes
+# in well under this; the cap only rejects oversized garbage cheaply.
+_MAX_CURSOR_LENGTH = 1024
+
 
 @dataclass(frozen=True)
 class Cursor:
@@ -88,6 +93,12 @@ def decode_cursor(raw: str) -> Cursor:
     """
     if not raw:
         raise InvalidQuery('cursor must not be empty')
+    # A legitimate cursor is a compact 6-field JSON blob (a few hundred base64
+    # chars). Reject anything far larger up front so an unauthenticated caller
+    # cannot force a base64-decode + JSON-parse of an arbitrarily long query-
+    # string value that is guaranteed to fail validation anyway.
+    if len(raw) > _MAX_CURSOR_LENGTH:
+        raise InvalidQuery('cursor is too long')
     try:
         padded = raw + '=' * (-len(raw) % 4)
         data = base64.urlsafe_b64decode(padded.encode('ascii'))

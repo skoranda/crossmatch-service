@@ -187,26 +187,21 @@ def recent_crossmatches(
             )
         )
 
+    # Detail levels are cumulative (ids < position < matches/full); each guard
+    # skips work, not the shared return.
     objects = [{'diaObjectId': int(r['lsst_diaObject_diaObjectId'])} for r in object_rows]
-    if detail == 'ids' or not object_rows:
-        return _envelope(
-            start, end, time_field, detail, objects, effective_page_size, next_cursor
-        )
 
-    for obj, row in zip(objects, object_rows):
-        ra, dec = row['ra_deg'], row['dec_deg']
-        obj['ra'] = float(ra) if ra is not None else None
-        obj['dec'] = float(dec) if dec is not None else None
+    if detail != 'ids' and object_rows:
+        for obj, row in zip(objects, object_rows):
+            ra, dec = row['ra_deg'], row['dec_deg']
+            obj['ra'] = float(ra) if ra is not None else None
+            obj['dec'] = float(dec) if dec is not None else None
 
-    if detail == 'position':
-        return _envelope(
-            start, end, time_field, detail, objects, effective_page_size, next_cursor
-        )
-
-    object_ids = [obj['diaObjectId'] for obj in objects]
-    matches_by_object = _load_matches(object_ids, detail)
-    for obj in objects:
-        obj['matches'] = matches_by_object.get(obj['diaObjectId'], [])
+        if detail != 'position':
+            object_ids = [obj['diaObjectId'] for obj in objects]
+            matches_by_object = _load_matches(object_ids, detail)
+            for obj in objects:
+                obj['matches'] = matches_by_object.get(obj['diaObjectId'], [])
 
     return _envelope(
         start, end, time_field, detail, objects, effective_page_size, next_cursor

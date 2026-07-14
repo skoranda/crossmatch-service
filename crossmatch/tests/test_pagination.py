@@ -87,6 +87,13 @@ def test_non_base64_cursor_raises():
         decode_cursor('not base64 !!!')
 
 
+def test_oversized_cursor_rejected_before_decode():
+    """An arbitrarily long cursor is rejected up front (unauthenticated endpoint
+    must not base64/JSON-decode unbounded input)."""
+    with pytest.raises(InvalidQuery):
+        decode_cursor('A' * 5000)
+
+
 def test_valid_base64_of_non_json_raises():
     import base64
     token = base64.urlsafe_b64encode(b'this is not json').decode('ascii').rstrip('=')
