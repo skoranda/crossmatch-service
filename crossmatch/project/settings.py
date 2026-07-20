@@ -23,8 +23,8 @@ DASK_VERSION_CHECK_TIMEOUT_SECONDS = int(os.getenv('DASK_VERSION_CHECK_TIMEOUT_S
 
 # LSDB crossmatch settings
 GAIA_HATS_URL = os.getenv('GAIA_HATS_URL', 's3://stpubdata/gaia/gaia_dr3/public/hats')
-DES_HATS_URL = os.getenv('DES_HATS_URL', 'https://data.lsdb.io/hats/des/des_y6_gold')
-DELVE_HATS_URL = os.getenv('DELVE_HATS_URL', 'https://data.lsdb.io/hats/delve/delve_dr3_gold')
+DES_HATS_URL = os.getenv('DES_HATS_URL', 's3://stpubdata/mast/public/des/hats/des_y6_gold')
+DELVE_HATS_URL = os.getenv('DELVE_HATS_URL', 's3://stpubdata/mast/public/delve/hats/delve_dr3_gold')
 SKYMAPPER_HATS_URL = os.getenv('SKYMAPPER_HATS_URL', 'https://data.lsdb.io/hats/skymapper_dr4/catalog')
 CROSSMATCH_RADIUS_ARCSEC = float(os.getenv('CROSSMATCH_RADIUS_ARCSEC', '1.0'))
 
