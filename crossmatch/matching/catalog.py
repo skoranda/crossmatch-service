@@ -36,22 +36,41 @@ _TRANSIENT_READ_SIGNATURES = (
 )
 
 
-def _is_transient_read_error(exc: BaseException) -> bool:
-    """True if ``exc`` (or anything in its cause/context chain) is a transient
-    remote-read failure worth retrying, matched by class name or message text so
-    fsspec's TypeError-wrapped form is caught too. Deterministic errors (bad
-    columns, no spatial overlap, version skew) return False so they still
-    fail loud immediately.
+def _transient_read_signature(exc: BaseException) -> str | None:
+    """The transient-read signature ``exc`` matches, or ``None``.
+
+    Walks the cause/context chain and matches by class name or message text, so
+    the raw aiohttp error and fsspec's confusing TypeError-wrapped form (e.g.
+    ``TypeError("'ServerDisconnectedError' object is not subscriptable")``) both
+    resolve to the underlying transient cause (``ServerDisconnectedError``).
+    Returning the signature rather than a bare bool lets callers log the real
+    connection failure instead of the misleading wrapper. Deterministic errors
+    (bad columns, no spatial overlap, version skew) match nothing.
     """
     seen: set[int] = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         seen.add(id(cur))
         text = f'{type(cur).__name__}: {cur}'
-        if any(sig in text for sig in _TRANSIENT_READ_SIGNATURES):
-            return True
+        for sig in _TRANSIENT_READ_SIGNATURES:
+            if sig in text:
+                return sig
         cur = cur.__cause__ or cur.__context__
-    return False
+    return None
+
+
+def is_transient_read_error(exc: BaseException) -> bool:
+    """True if ``exc`` (or anything in its cause/context chain) is a transient
+    remote-read failure worth skipping rather than failing loud.
+
+    The crossmatch loop uses this to decide skip-vs-fail-loud symmetrically with
+    the retry gate: only a transient read failure (a flapping catalog host) is
+    skippable. Deterministic errors -- a bad/missing/colliding column raised by
+    :func:`_get_catalog` (``ValueError``), a dependency/version-skew mismatch, no
+    spatial overlap -- return False so they still surface loudly instead of being
+    dropped from every future batch.
+    """
+    return _transient_read_signature(exc) is not None
 
 
 def _read_with_retry(read_fn, catalog_name: str):
@@ -65,12 +84,16 @@ def _read_with_retry(read_fn, catalog_name: str):
         try:
             return read_fn()
         except Exception as exc:
-            if attempt < attempts and _is_transient_read_error(exc):
+            signature = _transient_read_signature(exc)
+            if attempt < attempts and signature is not None:
+                # Name the underlying transient cause (``signature``) so the log
+                # is clear even when fsspec wraps it as an opaque TypeError.
                 logger.warning(
                     'Transient catalog read error; retrying',
                     catalog=catalog_name,
                     attempt=attempt,
                     max_attempts=attempts,
+                    transient=signature,
                     error=str(exc),
                 )
                 time.sleep(backoff * attempt)

@@ -69,6 +69,15 @@ CROSSMATCH_MATCHES = Counter(
     ["catalog"],
 )
 
+#: Catalogs skipped in a batch after their reads persistently failed (retries
+#: exhausted), by catalog. A sustained rate means that catalog's source is down
+#: and its matches are being silently dropped from published crossmatches.
+CATALOG_SKIPS = Counter(
+    "crossmatch_catalog_skips_total",
+    "Catalogs skipped after read failure, by catalog.",
+    ["catalog"],
+)
+
 #: Notifications published to a destination, by ``result`` (success|failure).
 NOTIFICATIONS_PUBLISHED = Counter(
     "crossmatch_notifications_published_total",

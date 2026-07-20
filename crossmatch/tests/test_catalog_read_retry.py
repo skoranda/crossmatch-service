@@ -17,7 +17,7 @@ from unittest import mock
 import pytest
 from django.test import override_settings
 
-from matching.catalog import _is_transient_read_error, _read_with_retry
+from matching.catalog import _read_with_retry, _transient_read_signature
 
 
 class _FakeServerDisconnectedError(Exception):
@@ -25,9 +25,10 @@ class _FakeServerDisconnectedError(Exception):
 
 
 def test_transient_detected_via_wrapping_typeerror_message():
-    # The exact surface fsspec produces from a dropped range read.
+    # The exact surface fsspec produces from a dropped range read. The signature
+    # names the underlying transient cause even though the wrapper is a TypeError.
     exc = TypeError("can't concat ServerDisconnectedError to bytes")
-    assert _is_transient_read_error(exc) is True
+    assert _transient_read_signature(exc) == "ServerDisconnectedError"
 
 
 def test_transient_detected_via_exception_chain():
@@ -35,9 +36,12 @@ def test_transient_detected_via_exception_chain():
         try:
             raise _FakeServerDisconnectedError("Server disconnected")
         except _FakeServerDisconnectedError as cause:
-            raise TypeError("'ServerDisconnectedError' object is not subscriptable") from cause
+            raise TypeError(
+                "'ServerDisconnectedError' object is not subscriptable"
+            ) from cause
     except TypeError as exc:
-        assert _is_transient_read_error(exc) is True
+        # The walk follows __cause__ to the real connection failure.
+        assert _transient_read_signature(exc) == "ServerDisconnectedError"
 
 
 def test_filenotfound_from_flaky_endpoint_is_transient():
@@ -47,12 +51,13 @@ def test_filenotfound_from_flaky_endpoint_is_transient():
         "https://data.lsdb.io/hats/des/des_y6_gold/des_y6_gold_5arcs/"
         "dataset/Norder=5/Dir=0/Npix=4351.parquet"
     )
-    assert _is_transient_read_error(exc) is True
+    assert _transient_read_signature(exc) == "FileNotFoundError"
 
 
 def test_deterministic_errors_are_not_transient():
-    assert _is_transient_read_error(ValueError("requested columns not found")) is False
-    assert _is_transient_read_error(RuntimeError("Catalogs do not overlap")) is False
+    # Deterministic errors match no signature, so they still fail loud.
+    assert _transient_read_signature(ValueError("requested columns not found")) is None
+    assert _transient_read_signature(RuntimeError("Catalogs do not overlap")) is None
 
 
 @override_settings(CROSSMATCH_READ_RETRIES=3, CROSSMATCH_READ_RETRY_BACKOFF_SECONDS=0)

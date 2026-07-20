@@ -146,6 +146,11 @@ def test_detail_full_reconstructs_published_payload():
         'catalog_source_id': '42',
         'separation_arcsec': 0.75,
         'catalog_payload': {'phot_g_mean_mag': 18.3},
+        # The shared builder always emits the coverage keys. A stored match has
+        # no batch context, so the read-model reports full coverage (partial
+        # False); the real per-batch skip set rides the published Hopskotch payload.
+        'catalogs_skipped': [],
+        'partial': False,
     }
 
 

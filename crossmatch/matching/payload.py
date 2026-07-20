@@ -76,6 +76,7 @@ def build_published_payload(
     catalog_source_id,
     separation_arcsec,
     catalog_payload,
+    catalogs_skipped=None,
 ):
     """Build the per-match payload published over Hopskotch.
 
@@ -94,12 +95,20 @@ def build_published_payload(
         separation_arcsec: Angular separation between alert and source, arcsec.
         catalog_payload: The catalog-specific payload dict (see
             :func:`build_catalog_payload`).
+        catalogs_skipped: Names of catalogs skipped in this crossmatch batch
+            because their reads persistently failed (``None`` / empty means the
+            crossmatch covered every configured catalog). Drives ``partial``.
+            The read-model API serves a stored match with no batch context, so it
+            passes ``None`` here (the published Hopskotch payload carries the real
+            per-batch value).
 
     Returns:
         A JSON-native dict with stable keys ``diaObjectId``, ``ra``, ``dec``,
         ``catalog_name``, ``catalog_source_id``, ``separation_arcsec``,
-        ``catalog_payload``.
+        ``catalog_payload``, ``catalogs_skipped`` (sorted list), and ``partial``
+        (true iff any catalog was skipped).
     """
+    skipped = sorted(catalogs_skipped) if catalogs_skipped else []
     return {
         'diaObjectId': int(dia_object_id),
         'ra': float(source_ra_deg),
@@ -108,4 +117,6 @@ def build_published_payload(
         'catalog_source_id': catalog_source_id,
         'separation_arcsec': float(separation_arcsec),
         'catalog_payload': catalog_payload,
+        'catalogs_skipped': skipped,
+        'partial': bool(skipped),
     }
