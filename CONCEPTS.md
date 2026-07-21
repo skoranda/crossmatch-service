@@ -18,6 +18,13 @@ A transient-source detection ingested from a Broker, carrying a sky position (ri
 ascension and declination, in degrees) and a Rubin object identifier. Alerts are the
 input stream the service crossmatches and publishes results for.
 
+An Alert moves through a status lifecycle as the pipeline processes it: *ingested* on
+arrival, *queued* when selected into a crossmatch batch, *matched* once that batch's
+crossmatch has run, and *notified* once its results have been published. The queued
+state is the unit of recovery: a batch whose worker is killed mid-run leaves its alerts
+stranded *queued* — a recovery timer later reverts them to *ingested* for re-dispatch
+rather than losing them, and an overrunning batch reverts itself the same way.
+
 ### Reliability
 The LSST real/bogus score for a detection: a 0-to-1 estimate of the probability that a
 diaSource is a genuine astrophysical transient rather than an imaging artifact. Brokers

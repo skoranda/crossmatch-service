@@ -104,3 +104,10 @@ whose type is useless but whose message still contains `ServerDisconnectedError`
 ## Related Issues
 - Fixed in commit on branch `fix/catalog-read-transient-retry`.
 - Fail-loud crossmatch design that this retry sits in front of: `tasks/crossmatch.py`.
+- [Celery soft time limit silently swallowed by the transient-read exception classifier](soft-time-limit-swallowed-by-exception-classifier.md)
+  — the `__cause__`/`__context__` class-name walk introduced here (later refactored
+  into `_transient_read_signature` / `is_transient_read_error`) has a sharp edge: a
+  Celery `SoftTimeLimitExceeded` that fires mid-read chains the in-flight transient
+  via `__context__`, so the walk matches its signature and treats the soft limit as
+  retryable. A type-guard re-raising `SoftTimeLimitExceeded` ahead of the classifier
+  keeps control-flow exceptions out of the transient path.
