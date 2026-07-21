@@ -141,9 +141,12 @@ Carried forward from the brainstorm requirements (IDs stable).
   the gitops **upstream** (ArgoCD's canonical repo), cut a new `prod-YYYY-MM-DD[-N]`
   git release tag — the next free sequence past the Application's current
   `targetRevision` (`prod-2026-07-21-2`, so `prod-2026-07-21-3`); the new tag must
-  advance strictly past the current pin — bump the `crossmatch-service-prod`
-  Application's `targetRevision` to it, and `kubectl apply` that argocd-app. Re-seal
-  (R2) must be committed before the tag is cut so the tag captures valid ciphertext.
+  advance strictly past the current pin — bump the `targetRevision` of all four
+  gitops-tag-tracking PROD Applications (`crossmatch-service-prod`, `dask-prod`,
+  `monitoring-prod`, `oauth2-proxy-prod`) to it and `kubectl apply` each, keeping the
+  whole environment on one release tag (not `traefik-prod`, which pins a Helm chart
+  version). Re-seal (R2) must be committed before the tag is cut so the tag captures
+  valid ciphertext.
 - **KTD5 — Isolate the gitops edits from the concurrent session.** A second session
   is actively editing this gitops repo (README.md) and creating/managing branches
   simultaneously. The cutover edits (U1, U3) go on a uniquely-named branch, touch
@@ -282,10 +285,14 @@ Run at/after promotion (runtime, not unit tests):
 ## Operational / Rollout Notes
 
 - **Promotion (KTD4):** commit U1–U3 to the gitops **upstream** (ArgoCD's canonical
-  repo — a personal fork is invisible to ArgoCD); cut a new `prod-<YYYY-MM-DD>` git
-  release tag; bump `argocd-apps/crossmatch-service-prod.yaml` `targetRevision` to the
-  new tag; `kubectl apply -f argocd-apps/crossmatch-service-prod.yaml`. Only the
-  crossmatch-service Application needs to advance for this change.
+  repo — a personal fork is invisible to ArgoCD); cut a new `prod-YYYY-MM-DD[-N]` git
+  release tag; bump the `targetRevision` of all four gitops-tag-tracking PROD
+  Applications (`crossmatch-service-prod`, `dask-prod`, `monitoring-prod`,
+  `oauth2-proxy-prod`) to the new tag and `kubectl apply` each, so the whole PROD
+  environment stays on one release tag. This release only changes crossmatch-service
+  (the others read byte-identical content at either tag), but keeping all four on a
+  single tag preserves a coherent, atomically-rollback-able snapshot. Leave
+  `traefik-prod` alone — it pins a Traefik Helm chart version, not the gitops tag.
 - **Concurrency (KTD5):** rebase the cutover branch onto the latest upstream `main`
   immediately before the tag cut so the tag captures the concurrent session's landed
   README/other work; confirm the tag commit contains the cutover files and not a
