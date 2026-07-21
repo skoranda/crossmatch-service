@@ -1,6 +1,7 @@
 import lsdb
 import pandas as pd
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import transaction
 from core.models import Alert, CatalogMatch, Notification
@@ -11,7 +12,13 @@ from core.metrics import CATALOG_SKIPS, CROSSMATCH_BATCHES, CROSSMATCH_MATCHES
 logger = get_logger(__name__)
 
 
-@shared_task(name="crossmatch_batch")
+# soft_time_limit reverts an overrunning batch via the on-raise path (self-heal,
+# R3/R4); time_limit is the SIGKILL backstop for a Dask call that never returns to
+# Python for the soft signal. Values are from the measured 100k-batch worst case
+# (~4.3 min), and MUST stay below CROSSMATCH_BATCH_STUCK_SECONDS so a live batch
+# self-reverts before the recovery timer could reclaim it (the ordering constraint
+# in docs/plans/2026-07-20-001-fix-crossmatch-batch-kill-recovery-plan.md).
+@shared_task(name="crossmatch_batch", soft_time_limit=480, time_limit=600)
 def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
     """Process a batch of alerts through LSDB crossmatch against all catalogs.
 
@@ -164,6 +171,11 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
                             dia_id, ra, dec, catalog_name, src_id, dist, catalog_payload
                         ),
                     )
+                except SoftTimeLimitExceeded:
+                    # The batch soft time limit can fire mid-row-build; it must not
+                    # be swallowed as an unbuildable row -- re-raise so the outer
+                    # handler reverts the batch to INGESTED for re-dispatch (R4).
+                    raise
                 except Exception:
                     logger.exception('Skipping unbuildable match row',
                                      catalog=catalog_name)
