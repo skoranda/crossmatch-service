@@ -74,9 +74,7 @@ def test_young_queued_batch_blocks_dispatch(delay_mock):
 
 
 @pytest.mark.django_db(transaction=True)
-@override_settings(
-    CROSSMATCH_BATCH_MAX_SIZE=2, CROSSMATCH_BATCH_MAX_WAIT_SECONDS=100000
-)
+@override_settings(CROSSMATCH_BATCH_MAX_SIZE=2, CROSSMATCH_BATCH_MAX_WAIT_SECONDS=100000)
 def test_dispatch_stamps_queued_at(delay_mock):
     # Dispatching a batch records when each alert entered QUEUED, so stuck
     # detection can measure real batch runtime rather than ingest age.

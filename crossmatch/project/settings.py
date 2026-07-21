@@ -168,6 +168,23 @@ CROSSMATCH_BATCH_TIME_LIMIT_SECONDS = int(
 CROSSMATCH_BATCH_STUCK_SECONDS = int(
     os.getenv('CROSSMATCH_BATCH_STUCK_SECONDS', '780')
 )
+# Fail fast on a misconfigured deploy rather than silently letting the recovery
+# timer reclaim a live batch (which would re-dispatch a concurrent run). All three
+# bounds are independently env-configurable, so enforce the ordering at startup.
+if not (
+    CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS
+    < CROSSMATCH_BATCH_TIME_LIMIT_SECONDS
+    < CROSSMATCH_BATCH_STUCK_SECONDS
+):
+    raise ImproperlyConfigured(
+        'Crossmatch batch time bounds must satisfy '
+        'CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS < '
+        'CROSSMATCH_BATCH_TIME_LIMIT_SECONDS < CROSSMATCH_BATCH_STUCK_SECONDS so the '
+        'stuck-batch recovery timer never reclaims a live batch (got '
+        f'{CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS} / '
+        f'{CROSSMATCH_BATCH_TIME_LIMIT_SECONDS} / '
+        f'{CROSSMATCH_BATCH_STUCK_SECONDS}).'
+    )
 
 # Resilience for transient remote HATS catalog reads (data.lsdb.io drops
 # connections mid parquet read -> aiohttp ServerDisconnectedError). Total read

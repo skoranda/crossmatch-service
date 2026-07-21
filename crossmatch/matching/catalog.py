@@ -4,6 +4,7 @@ import time
 
 import lsdb
 import pandas as pd
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from core.log import get_logger
 
@@ -83,6 +84,13 @@ def _read_with_retry(read_fn, catalog_name: str):
     for attempt in range(1, attempts + 1):
         try:
             return read_fn()
+        except SoftTimeLimitExceeded:
+            # A batch soft time limit is not a retryable read error -- it must
+            # propagate so tasks/crossmatch.py reverts the batch. If it fires mid
+            # read/compute while a transient disconnect is being handled, Python
+            # chains that transient via __context__, which the message-based
+            # signature below would match and (wrongly) retry. Match by type first.
+            raise
         except Exception as exc:
             signature = _transient_read_signature(exc)
             if attempt < attempts and signature is not None:

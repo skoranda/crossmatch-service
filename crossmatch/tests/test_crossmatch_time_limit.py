@@ -32,6 +32,11 @@ TEST_CATALOGS = [
     }
 ]
 
+TWO_CATALOGS = [
+    {**TEST_CATALOGS[0], "name": "cat_a", "hats_url": "a"},
+    {**TEST_CATALOGS[0], "name": "cat_b", "hats_url": "b"},
+]
+
 
 @pytest.fixture(autouse=True)
 def _mock_lsdb(monkeypatch):
@@ -122,6 +127,32 @@ def test_soft_limit_during_row_build_not_swallowed(monkeypatch):
     alert.refresh_from_db()
     assert alert.status == Alert.Status.INGESTED  # not swallowed; reverted
     assert Notification.objects.filter(alert=alert).count() == 0
+
+
+@pytest.mark.django_db
+@override_settings(CROSSMATCH_CATALOGS=TWO_CATALOGS)
+def test_soft_limit_after_first_catalog_wrote_reverts(monkeypatch):
+    # The realistic production case: catalog 1 succeeds and its CatalogMatch rows
+    # are already written (committed per-catalog, before finalization) when catalog
+    # 2's read overruns the soft limit. The batch must still revert the alert to
+    # INGESTED (not finalize MATCHED); catalog 1's rows persist and re-run is
+    # idempotent, and nothing is published.
+    alert = AlertFactory(status=Alert.Status.QUEUED)
+
+    def _dispatch(alerts_catalog, catalog_config):
+        if catalog_config["name"] == "cat_a":
+            return _match_df(alert)
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(crossmatch_mod, "crossmatch_alerts", _dispatch)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        crossmatch_batch([str(alert.uuid)])
+
+    alert.refresh_from_db()
+    assert alert.status == Alert.Status.INGESTED  # reverted despite cat_a success
+    assert CatalogMatch.objects.filter(alert=alert, catalog_name="cat_a").count() == 1
+    assert Notification.objects.filter(alert=alert).count() == 0  # never finalized
 
 
 @pytest.mark.django_db

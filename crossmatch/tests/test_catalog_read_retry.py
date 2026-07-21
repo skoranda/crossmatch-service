@@ -125,3 +125,27 @@ def test_deterministic_error_not_retried():
             _read_with_retry(read_fn, "gaia_dr3")
 
     assert calls["n"] == 1  # surfaced immediately, fail-loud preserved
+
+
+@override_settings(CROSSMATCH_READ_RETRIES=3, CROSSMATCH_READ_RETRY_BACKOFF_SECONDS=0)
+def test_soft_time_limit_is_not_retried():
+    # A batch soft time limit must propagate, never be retried -- even when it
+    # chains a transient error via __context__ (the soft signal fired mid-read
+    # while a disconnect was being handled), which the transient signature would
+    # otherwise match and absorb as a retry, defeating the batch self-heal.
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    calls = {"n": 0}
+
+    def read_fn():
+        calls["n"] += 1
+        try:
+            raise _FakeServerDisconnectedError("Server disconnected")
+        except _FakeServerDisconnectedError:
+            raise SoftTimeLimitExceeded()
+
+    with mock.patch("matching.catalog.time.sleep"):
+        with pytest.raises(SoftTimeLimitExceeded):
+            _read_with_retry(read_fn, "des_y6_gold")
+
+    assert calls["n"] == 1  # propagated immediately despite the chained transient
