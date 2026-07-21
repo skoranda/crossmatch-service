@@ -321,10 +321,10 @@ recovery ≈ 13 min, inside R1's ~10-15 min).
 - **Verification:** at the new value, a simulated stuck batch is reclaimed within
   the target window and a fresh `QUEUED` batch is untouched.
 
-### U3. Measure runtime to set the values (done), then the DEV hard-kill drill
+### U3. Measure runtime to set the values, then the DEV hard-kill drill (both done)
 
-_Runs first — U1/U2 depend on its values. The measurement is **complete** (this
-session, 2026-07-21); only the drill remains, and it runs after U1/U2 land._
+_Runs first — U1/U2 depend on its values. Both the measurement and the DEV
+hard-kill drill are **complete** (2026-07-21); results below._
 
 **Measured runtimes (PROD, 2026-07-21):**
 
@@ -351,16 +351,22 @@ Runtime is strongly **sub-linear** (catalog-read-bound, not alert-count-bound):
   Chosen values: `soft_limit=480s` (~1.9× the 4.3 min worst case), `hard_limit=600s`,
   `stuck_threshold=780s` → recovery ≈ 13 min, inside R1. The KTD6 contingency is
   **resolved favorably** — R1's target is achievable at the fixed 100k batch size (KD5).
-- **Execution note:** measurement is done and the values are final (not provisional);
-  only the DEV hard-kill drill remains, and it runs after U1/U2.
+- **Execution note:** measurement and the DEV hard-kill drill are both done; the
+  values are final and the recovery behavior is validated end-to-end (results below).
 - **Test scenarios:** Test expectation: none — measurement + operational validation;
   automated behavioral coverage lives in U1/U2. The hard-kill drill is an operational
   verification, not a unit test.
-- **Verification:** Covers AE1 / AE4 — deleting the worker pod during a running
-  batch on DEV reverts `QUEUED → INGESTED` and re-dispatches within the measured
-  target window, unattended and with no manual DB action; the chosen `soft_limit`
-  sits above the measured worst-case runtime (no false reverts of legit batches
-  observed during the measurement window).
+- **Verification — DEV hard-kill drill PASSED (2026-07-21, on v0.8.0):** seeded a
+  running batch (8,000 alerts), then SIGKILLed the worker (`--grace-period=0
+  --force`) 28s into the batch — an uncatchable kill, so the on-raise revert never
+  ran (R2). The 8,000 alerts stranded `QUEUED`; the dispatcher's stuck-timer
+  auto-recovered them at **exactly `queued_at + 780s` (13.0 min)** — logged
+  `Auto-recovered stuck QUEUED alerts count=8000 oldest_age_seconds=780.15` — then
+  reverted to `INGESTED`, re-dispatched, and re-crossmatched all 8,000 back to
+  `MATCHED`/`NOTIFIED`. Covers AE1 (recovery inside the ~10-15 min target), AE4 (no
+  manual DB action), R2 (signal-independent), and R5 (idempotent re-run + the
+  operator-visible warning log). Before this change the same kill would have stalled
+  the pipeline for up to 1 hour (the old 3600s threshold).
 
 ---
 
@@ -369,7 +375,8 @@ Runtime is strongly **sub-linear** (catalog-read-bound, not alert-count-bound):
 - U1 and U2 unit tests pass in-container (`pytest` via the compose worker, per
   `docs/developer.md`).
 - AE2/AE3/AE5, and AE1's reclaim mechanism, are covered by U1/U2 automated tests;
-  AE1 and AE4 are verified end-to-end by the U3 DEV hard-kill drill.
+  AE1 and AE4 were verified end-to-end by the U3 DEV hard-kill drill (**passed
+  2026-07-21 on v0.8.0** — recovery at exactly `queued_at + 780s` / 13.0 min; see U3).
 - The `soft_limit` (480s) sits above the U3-measured worst-case 100k runtime (258s)
   with ~1.9× headroom (KTD6); confirm no false reverts of legit batches during the
   post-deploy DEV/PROD soak.
@@ -428,7 +435,9 @@ Runtime is strongly **sub-linear** (catalog-read-bound, not alert-count-bound):
 - `CROSSMATCH_BATCH_STUCK_SECONDS` lowered to 780s with the documented
   ordering-constraint comment; the dispatcher guard reclaims stuck batches at the new
   value (U2).
-- The DEV hard-kill drill reclaims `QUEUED → INGESTED` and re-dispatches within the
-  ~13 min target window, unattended (U3, after U1/U2 land).
+- The DEV hard-kill drill **passed** (U3, 2026-07-21 on v0.8.0): a SIGKILL mid-batch
+  stranded 8,000 alerts `QUEUED`; the stuck-timer reclaimed them to `INGESTED` and
+  re-dispatched at exactly `queued_at + 780s` (13.0 min), unattended, and all 8,000
+  re-crossmatched back to `MATCHED`.
 - U1/U2 tests pass; full suite green in-container; changed files `black`-formatted.
 - Idempotency verified (KTD7); recovery introduces no new duplicate publications (R5).
