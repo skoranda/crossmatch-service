@@ -12,15 +12,20 @@ are left NULL, so their payloads stay until they actually reach a terminal state
 
 ``notified_at`` is set to ``ingest_time`` (a defensible floor — the alert became
 terminal shortly after ingest, and for existing rows the grace math is dominated by
-their age). Chunked and non-atomic so it commits incrementally and never holds one
-long transaction on the live table; the ``ACCESS EXCLUSIVE``-free index already
-exists from 0007. Mirrors ``0004_backfill_healpix_ipix.py``. A production rollout on
-a live, actively-ingesting table should still run this in a quiet window — see the
-retention plan (KTD2).
+their age). A production rollout on a live, actively-ingesting table should still run
+this in a quiet window — see the retention plan (KTD2).
+
+Uses a **keyset loop, not a streaming ``.iterator()``**: this migration is
+``atomic=False`` so it can commit each chunk incrementally on the live ~110 GB table,
+but a COMMIT closes a WITHOUT-HOLD server-side cursor, which would break a long-lived
+``.iterator()`` mid-run (``InvalidCursorName``) and abort ``migrate``. Instead, each
+pass re-selects a bounded pk slice; setting ``notified_at`` drops those rows out of
+the ``notified_at__isnull=True`` predicate, so the loop terminates without tracking
+an offset and never holds a cursor across a commit.
 """
 
 from django.db import migrations
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, F, OuterRef, Q
 
 BATCH_SIZE = 5000
 
@@ -33,21 +38,15 @@ def backfill_notified_at(apps, schema_editor):
         alert_id=OuterRef('lsst_diaObject_diaObjectId')
     ).exclude(state='sent')
 
-    queryset = (
-        Alert.objects.filter(notified_at__isnull=True)
-        .filter(Q(status='NOTIFIED') | (Q(status='MATCHED') & ~Exists(unsent)))
-        .only('pk', 'ingest_time', 'notified_at')
+    terminal = Alert.objects.filter(notified_at__isnull=True).filter(
+        Q(status='NOTIFIED') | (Q(status='MATCHED') & ~Exists(unsent))
     )
 
-    batch = []
-    for alert in queryset.iterator(chunk_size=BATCH_SIZE):
-        alert.notified_at = alert.ingest_time
-        batch.append(alert)
-        if len(batch) >= BATCH_SIZE:
-            Alert.objects.bulk_update(batch, ['notified_at'], batch_size=BATCH_SIZE)
-            batch = []
-    if batch:
-        Alert.objects.bulk_update(batch, ['notified_at'], batch_size=BATCH_SIZE)
+    while True:
+        pks = list(terminal.values_list('pk', flat=True)[:BATCH_SIZE])
+        if not pks:
+            break
+        Alert.objects.filter(pk__in=pks).update(notified_at=F('ingest_time'))
 
 
 def noop_reverse(apps, schema_editor):

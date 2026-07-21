@@ -41,25 +41,19 @@ def sweep_payloads(grace_days: int, max_rows: int) -> dict:
 
     cutoff = timezone.now() - timedelta(days=grace_days)
 
-    alert_pks = list(
-        Alert.objects.filter(payload__isnull=False, notified_at__lt=cutoff)
-        .values_list('pk', flat=True)[:max_rows]
-    )
-    alerts_cleared = (
-        Alert.objects.filter(pk__in=alert_pks).update(payload=None)
-        if alert_pks
-        else 0
-    )
+    def _clear(model, anchor_field) -> int:
+        # A sliced (LIMIT) queryset cannot be updated directly, so select the
+        # capped pk set first, then update it. An empty pk set short-circuits to
+        # zero rows with no SQL.
+        pks = list(
+            model.objects.filter(
+                payload__isnull=False, **{f'{anchor_field}__lt': cutoff}
+            ).values_list('pk', flat=True)[:max_rows]
+        )
+        return model.objects.filter(pk__in=pks).update(payload=None)
 
-    notif_pks = list(
-        Notification.objects.filter(payload__isnull=False, sent_at__lt=cutoff)
-        .values_list('pk', flat=True)[:max_rows]
-    )
-    notifications_cleared = (
-        Notification.objects.filter(pk__in=notif_pks).update(payload=None)
-        if notif_pks
-        else 0
-    )
+    alerts_cleared = _clear(Alert, 'notified_at')
+    notifications_cleared = _clear(Notification, 'sent_at')
 
     if alerts_cleared or notifications_cleared:
         logger.info(

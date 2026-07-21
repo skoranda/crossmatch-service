@@ -130,3 +130,17 @@ def test_backfill_sets_notified_at_for_terminal_alerts_only():
     assert no_match.notified_at is not None
     assert in_flight_matched.notified_at is None
     assert queued.notified_at is None
+
+
+@pytest.mark.django_db
+def test_backfill_covers_matched_with_all_notifications_sent():
+    # A MATCHED alert whose notifications are all SENT is terminal (no unsent) and
+    # must be backfilled, not left NULL.
+    mod = importlib.import_module("core.migrations.0008_backfill_notified_at")
+    alert = AlertFactory(status=Alert.Status.MATCHED, notified_at=None)
+    NotificationFactory(
+        alert=alert, state=Notification.State.SENT, sent_at=timezone.now()
+    )
+    mod.backfill_notified_at(django_apps, None)
+    alert.refresh_from_db()
+    assert alert.notified_at is not None

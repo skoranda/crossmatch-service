@@ -216,4 +216,11 @@ class Notification(models.Model):
         indexes = [
             models.Index(fields=['state'], name='core_notif_state_idx'),
             models.Index(fields=['alert'], name='core_notif_alert_idx'),
+            # Mirror of the alert-side retention index: the sweep filters on
+            # sent_at among rows still carrying a payload.
+            models.Index(
+                fields=['sent_at'],
+                name='core_notif_sent_at_idx',
+                condition=models.Q(payload__isnull=False),
+            ),
         ]

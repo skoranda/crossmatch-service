@@ -104,3 +104,40 @@ def test_invalid_coordinate_batch_notified_at_set_at_early_return(monkeypatch):
     alert.refresh_from_db()
     assert alert.status == Alert.Status.MATCHED
     assert alert.notified_at is not None  # site 1 (invalid-coord early return)
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(CROSSMATCH_CATALOGS=TEST_CATALOGS)
+def test_mixed_batch_anchors_only_the_non_matched_subset(monkeypatch):
+    # A heterogeneous batch: one matched, one valid-coord no-match, one invalid-coord.
+    # Only the non-matched subset is terminal at step 4 and gets notified_at; the
+    # matched alert must stay NULL (anchored later at NOTIFIED), never overwritten.
+    matched = AlertFactory(status=Alert.Status.QUEUED)
+    no_match = AlertFactory(status=Alert.Status.QUEUED)
+    invalid = AlertFactory(
+        status=Alert.Status.QUEUED, ra_deg=math.nan, dec_deg=math.nan
+    )
+    monkeypatch.setattr(
+        crossmatch_mod.lsdb, "from_dataframe", lambda *a, **k: MagicMock()
+    )
+    result = pd.DataFrame(
+        [
+            {
+                "lsst_diaObject_diaObjectId": matched.lsst_diaObject_diaObjectId,
+                "source_id": "cat-1",
+                "_dist_arcsec": 0.4,
+                "ra": 180.0,
+                "dec": -30.0,
+                "mag": 18.2,
+            }
+        ]
+    )
+    monkeypatch.setattr(crossmatch_mod, "crossmatch_alerts", lambda *a, **k: result)
+
+    crossmatch_batch([str(matched.uuid), str(no_match.uuid), str(invalid.uuid)])
+    for a in (matched, no_match, invalid):
+        a.refresh_from_db()
+    assert matched.status == Alert.Status.MATCHED
+    assert matched.notified_at is None  # matched alert not anchored at step 4
+    assert no_match.notified_at is not None
+    assert invalid.notified_at is not None

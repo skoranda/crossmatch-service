@@ -63,6 +63,17 @@ commit):
 
 Route both to an actionable channel (not just a Grafana panel).
 
+## Rollback caveat (migration 0006 is irreversible once the sweep runs)
+
+Migration `0006` makes the payload columns nullable. Reversing it emits
+`ALTER COLUMN payload SET NOT NULL`, which PostgreSQL rejects once **any** payload is
+NULL — i.e. as soon as the retention sweep has cleared one row (PROD ~30 days after
+enable, DEV ~3 days). So rollback below `0006` is **unsupported** once the sweep has
+run: an emergency downgrade must first re-populate or `DELETE` the null-payload rows.
+The data nulling was already permanent (governance decision); this notes that the
+*schema* migration is permanent too. (`0008`'s `noop_reverse` leaving `notified_at`
+populated is separately fine.)
+
 ## Rollout order (per env)
 
 1. Set the grace (DEV 3d via `values-dev.yaml`; PROD inherits 30d), deploy.
