@@ -87,6 +87,14 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
 
             try:
                 result_df = crossmatch_alerts(alerts_catalog, catalog_config)
+            except SoftTimeLimitExceeded:
+                # The batch soft time limit must self-heal by reverting (R4), never
+                # be misread as a catalog skip. It can fire while a transient read
+                # error is being handled inside _read_with_retry, which implicitly
+                # chains it (SoftTimeLimitExceeded.__context__ = the transient exc);
+                # the message-based transient classifier below would then walk the
+                # chain and skip the catalog. Match by type here, ahead of that.
+                raise
             except Exception as exc:
                 # No spatial overlap is normal, not an error: the batch footprint
                 # misses this catalog's footprint (e.g. DES's southern-only sky).

@@ -78,6 +78,30 @@ def test_soft_limit_during_compute_reverts(monkeypatch):
 
 @pytest.mark.django_db
 @override_settings(CROSSMATCH_CATALOGS=TEST_CATALOGS)
+def test_soft_limit_chained_from_transient_not_skipped(monkeypatch):
+    # The soft limit can fire while a transient read error is being handled, which
+    # implicitly chains it (SoftTimeLimitExceeded.__context__ = the transient exc).
+    # The per-catalog handler classifies transient errors by walking that chain, so
+    # it must match the soft limit by TYPE first and revert -- not skip the catalog.
+    def _soft_chained(*a, **k):
+        try:
+            raise RuntimeError("ServerDisconnectedError: peer dropped")
+        except RuntimeError:
+            raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(crossmatch_mod, "crossmatch_alerts", _soft_chained)
+    alert = AlertFactory(status=Alert.Status.QUEUED)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        crossmatch_batch([str(alert.uuid)])
+
+    alert.refresh_from_db()
+    assert alert.status == Alert.Status.INGESTED  # reverted, not skipped
+    assert Notification.objects.filter(alert=alert).count() == 0
+
+
+@pytest.mark.django_db
+@override_settings(CROSSMATCH_CATALOGS=TEST_CATALOGS)
 def test_soft_limit_during_row_build_not_swallowed(monkeypatch):
     # KTD4 guard: the soft limit can fire while a match row is being built, where
     # the per-row `except Exception: continue` would otherwise swallow it and let
