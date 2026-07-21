@@ -4,6 +4,7 @@ from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 from core.models import Alert, CatalogMatch, Notification
 from matching.catalog import crossmatch_alerts, is_transient_read_error
 from matching.payload import build_catalog_payload, build_published_payload
@@ -57,8 +58,10 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
         clean_df = alerts_df.dropna(subset=['ra_deg', 'dec_deg'])
         if clean_df.empty:
             logger.warning('No alerts with valid coordinates to crossmatch')
+            # Terminal, zero-notification alerts: anchor their retention grace now
+            # (they never reach the NOTIFIED transition).
             Alert.objects.filter(pk__in=batch_ids).update(
-                status=Alert.Status.MATCHED
+                status=Alert.Status.MATCHED, notified_at=timezone.now()
             )
             return
         alerts_catalog = lsdb.from_dataframe(
@@ -237,6 +240,13 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
             Alert.objects.filter(pk__in=batch_ids).update(
                 status=Alert.Status.MATCHED
             )
+            # No-match alerts (zero notifications) are terminal here and never reach
+            # the NOTIFIED transition -- anchor their retention grace now. Matched
+            # alerts instead get notified_at at the NOTIFIED transition.
+            matched_keys = {n.alert_id for n in all_notifications}
+            Alert.objects.filter(pk__in=batch_ids).exclude(
+                lsst_diaObject_diaObjectId__in=matched_keys
+            ).update(notified_at=timezone.now())
         CROSSMATCH_BATCHES.labels(result='completed').inc()
         logger.info('Crossmatch batch complete',
                     batch_size=len(batch_ids),
