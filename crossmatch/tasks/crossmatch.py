@@ -14,11 +14,14 @@ logger = get_logger(__name__)
 
 # soft_time_limit reverts an overrunning batch via the on-raise path (self-heal,
 # R3/R4); time_limit is the SIGKILL backstop for a Dask call that never returns to
-# Python for the soft signal. Values are from the measured 100k-batch worst case
-# (~4.3 min), and MUST stay below CROSSMATCH_BATCH_STUCK_SECONDS so a live batch
-# self-reverts before the recovery timer could reclaim it (the ordering constraint
-# in docs/plans/2026-07-20-001-fix-crossmatch-batch-kill-recovery-plan.md).
-@shared_task(name="crossmatch_batch", soft_time_limit=480, time_limit=600)
+# Python for the soft signal. Both are env-configurable settings that MUST stay
+# below CROSSMATCH_BATCH_STUCK_SECONDS (the ordering constraint documented there)
+# so a live batch self-reverts before the recovery timer could reclaim it.
+@shared_task(
+    name="crossmatch_batch",
+    soft_time_limit=settings.CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=settings.CROSSMATCH_BATCH_TIME_LIMIT_SECONDS,
+)
 def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
     """Process a batch of alerts through LSDB crossmatch against all catalogs.
 

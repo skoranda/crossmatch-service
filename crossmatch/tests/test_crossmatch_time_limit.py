@@ -178,3 +178,21 @@ def test_revert_then_rerun_is_idempotent(monkeypatch):
     assert alert.status == Alert.Status.MATCHED
     assert CatalogMatch.objects.filter(alert=alert).count() == 1  # no duplicate
     assert Notification.objects.filter(alert=alert).count() == 1  # created once
+
+
+def test_time_limits_below_stuck_threshold():
+    # Ordering constraint (KTD5/KTD6): the recovery timer must never reclaim a live
+    # batch, so the crossmatch_batch time limits must sit below the stuck threshold
+    # (a live batch self-reverts at its soft limit before the timer fires), with a
+    # margin over the soft limit for broker/pickup latency + clock skew. This pins
+    # the shipped defaults so a future edit can't silently invert them.
+    from django.conf import settings
+
+    soft = crossmatch_batch.soft_time_limit
+    hard = crossmatch_batch.time_limit
+    stuck = settings.CROSSMATCH_BATCH_STUCK_SECONDS
+
+    assert soft is not None and hard is not None
+    assert soft < hard  # hard time limit is a SIGKILL backstop above soft
+    assert hard < stuck  # a batch self-reverts (or is killed) before the timer reclaims
+    assert stuck - soft >= 120  # margin for pickup latency + clock skew
