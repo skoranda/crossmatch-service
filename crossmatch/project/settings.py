@@ -140,10 +140,17 @@ CROSSMATCH_BATCH_MAX_SIZE = int(
 # recovers it: QUEUED alerts whose queued_at is older than this are reverted to
 # INGESTED and re-dispatched. Measured against queued_at (when the batch was
 # dispatched), NOT ingest_time, so it never reverts a live batch of
-# long-ingested alerts. Keep it comfortably above the real max batch runtime
-# (a full batch runs single-digit minutes) and below any need for fast recovery.
+# long-ingested alerts.
+#
+# Ordering constraint (so the timer never reclaims a LIVE batch): this must exceed
+# the crossmatch_batch soft time limit PLUS worst-case broker/pickup latency PLUS a
+# clock-skew allowance. A live batch that overruns its soft limit self-reverts (via
+# SoftTimeLimitExceeded) before this timer can fire; this timer only catches the
+# hard-kill case. Sized from the measured 100k-batch worst case (~4.3 min): soft
+# limit 480s < this 780s (~5 min margin over soft) -> recovery ~13 min. See
+# docs/plans/2026-07-20-001-fix-crossmatch-batch-kill-recovery-plan.md.
 CROSSMATCH_BATCH_STUCK_SECONDS = int(
-    os.getenv('CROSSMATCH_BATCH_STUCK_SECONDS', '3600')
+    os.getenv('CROSSMATCH_BATCH_STUCK_SECONDS', '780')
 )
 
 # Resilience for transient remote HATS catalog reads (data.lsdb.io drops

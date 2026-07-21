@@ -74,7 +74,9 @@ def test_young_queued_batch_blocks_dispatch(delay_mock):
 
 
 @pytest.mark.django_db(transaction=True)
-@override_settings(CROSSMATCH_BATCH_MAX_SIZE=2, CROSSMATCH_BATCH_MAX_WAIT_SECONDS=100000)
+@override_settings(
+    CROSSMATCH_BATCH_MAX_SIZE=2, CROSSMATCH_BATCH_MAX_WAIT_SECONDS=100000
+)
 def test_dispatch_stamps_queued_at(delay_mock):
     # Dispatching a batch records when each alert entered QUEUED, so stuck
     # detection can measure real batch runtime rather than ingest age.
@@ -129,3 +131,22 @@ def test_live_batch_of_old_alerts_not_reverted(delay_mock):
     live.refresh_from_db()
     assert live.status == Alert.Status.QUEUED
     assert not delay_mock.called
+
+
+def test_time_limits_below_stuck_threshold():
+    # Ordering constraint (KTD5/KTD6): the recovery timer must never reclaim a live
+    # batch, so the crossmatch_batch time limits must sit below the stuck threshold
+    # (a live batch self-reverts at its soft limit before the timer fires), with a
+    # margin over the soft limit for broker/pickup latency + clock skew. This pins
+    # the shipped defaults so a future edit can't silently invert them.
+    from django.conf import settings
+    from tasks.crossmatch import crossmatch_batch
+
+    soft = crossmatch_batch.soft_time_limit
+    hard = crossmatch_batch.time_limit
+    stuck = settings.CROSSMATCH_BATCH_STUCK_SECONDS
+
+    assert soft is not None and hard is not None
+    assert soft < hard  # hard time limit is a SIGKILL backstop above soft
+    assert hard < stuck  # a batch self-reverts (or is killed) before the timer reclaims
+    assert stuck - soft >= 120  # margin for pickup latency + clock skew
