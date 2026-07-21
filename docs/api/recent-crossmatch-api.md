@@ -9,13 +9,20 @@ night of observing") without a database login.
 ## Endpoint
 
 ```
-GET https://crossmatch-dev.scimma.org/api/recent-crossmatches
+GET https://crossmatch.scimma.org/api/recent-crossmatches
 ```
 
-On DEV this endpoint is **public and unauthenticated** by design (a per-page
-object cap and a maximum window span bound the work any one request can trigger;
-total iteration across pages is intentionally unbounded, with rate limiting
-deferred). Do not assume that posture on any future non-DEV deployment.
+This endpoint is **public and unauthenticated** — no credentials are needed. A
+per-page object cap and a maximum window span bound the work any one request can
+trigger, and a per-source-IP rate limit at the edge bounds request rate: a client
+that exceeds it is rejected with `429` and should back off and retry. Retry with
+exponential backoff and jitter, honoring `Retry-After` if the response carries
+it, and give up after a small fixed number of attempts rather than retrying
+indefinitely.
+
+**Authentication and authorization will be required in a future release.**
+No date or mechanism is fixed yet. Write clients so that credentials can be added
+later without restructuring the request path.
 
 Results are **keyset (cursor) paged**: each response returns one operator-bounded
 page plus an opaque `next_cursor`; following the cursor to exhaustion returns the
@@ -54,6 +61,11 @@ non-positive or non-integer `page_size`, a malformed `cursor`, a `cursor`
 presented with a conflicting `start`/`end`/`time_field`/`detail`, an `end`
 earlier than `start`, or a window span beyond the maximum. A non-`GET` method
 returns `405`.
+
+A request that exceeds the rate limit returns `429`. This response is produced
+by the edge proxy rather than the application, so — unlike `400` and `405` — it
+does **not** carry the `{"error": ...}` JSON body. Detect it by status code
+alone; do not parse the body.
 
 ## Response
 
