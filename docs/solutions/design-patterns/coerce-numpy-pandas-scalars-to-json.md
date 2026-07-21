@@ -140,7 +140,7 @@ Concrete before → after values:
 | key `raj2000` (SkyMapper) | key `raj2000` | already lowercase, J2000 suffix preserved |
 | declared column absent from row | key present, value `None` | stable key set per catalog |
 
-Verification approach (auto memory [claude]): this repo has **no functioning Python test runner**, so the helper was verified by a standalone script `scripts/check_payload.py` (loads `payload.py` by file path to avoid importing the Django package) with assertions covering lowercase keying, case-flip, J2000 preservation, NaN/`pd.NA`/native-`nan` → `None`, int16/int32/int64 coercion, bool staying bool, the stable key set, and full `json.dumps` serializability (including `NaN` rendering as `null`). It is run in a throwaway `/tmp` venv because the local venvs have dead python3.12 symlinks (system is python3.13).
+Verification approach: the helper is covered by the pytest suite — `crossmatch/tests/test_payload.py` exercises `build_catalog_payload`/`build_published_payload` for lowercase keying, case-flip, J2000 preservation, NaN/`pd.NA`/native-`nan` → `None`, int16/int32/int64 coercion, bool staying bool, the stable key set, and full `json.dumps` serializability (including `NaN` rendering as `null`); run it in-container against the compose Postgres per `docs/developer.md`. A dependency-light standalone check also exists — `scripts/check_payload.py` loads `payload.py` by file path (no Django import) and asserts the same properties; run it in a throwaway venv with numpy + pandas when you want to verify the coercion without bringing up the app (local venvs have dead python3.12 symlinks, so use a fresh one).
 
 ## Related
 

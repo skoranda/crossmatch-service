@@ -7,7 +7,7 @@ problem_type: convention
 component: development_workflow
 severity: medium
 applies_when:
-  - Upgrading any Python package pinned in both requirements.base.txt and docker-compose.yaml EXTRA_PIP_PACKAGES
+  - Upgrading any Python package pinned in requirements.base.txt / requirements.lock and docker-compose.yaml EXTRA_PIP_PACKAGES
   - Realigning local docker-compose Dask pins with the remote EKS Dask cluster
   - Performing a drop-in maintenance bump where no source-code API changes are expected
   - Upgrading a package outside the fail-fast Dask version check coverage (e.g., lsdb)
@@ -19,14 +19,15 @@ tags: [dependency-management, dask-cluster, docker-compose, lsdb, version-pinnin
 
 ## Context
 
-The crossmatch service pins dependency versions in three places: the application requirements file and the `EXTRA_PIP_PACKAGES` environment variable on each of the two local docker-compose Dask services (scheduler and worker). This triplication exists because the local docker-compose stack runs its own scheduler and worker containers that must carry the same package set as the application layer, AND the service connects to a remote EKS Dask cluster operated independently by a colleague whose package environment changes out-of-band.
+The crossmatch service pins dependency versions in four places: the application requirements file (`requirements.base.txt`), the compiled lockfile (`crossmatch/requirements.lock`, which the runtime image is actually built from), and the `EXTRA_PIP_PACKAGES` environment variable on each of the two local docker-compose Dask services (scheduler and worker). This spread of pin sites exists because the runtime image and the local docker-compose scheduler/worker containers must all carry the same package set as the application layer, AND the service connects to a remote EKS Dask cluster operated independently by a colleague whose package environment changes out-of-band.
 
-A fail-fast Dask version check at celery worker startup (`crossmatch/core/dask.py`, `_VERSION_CHECK_PACKAGES`) compares a curated list of serialization-critical packages between the local client and the connected scheduler/workers — but it does not cover every dependency. Notably, it does not cover `lsdb`. This combination — scattered pin sites, a remote cluster whose state changes out-of-band, and a version check with deliberate scope limits — creates a specific failure mode: a developer who doesn't know all three pin sites exist, or who updates them in separate commits, will either leave the local stack in a transiently broken state or leave drift undetected until a runtime smoke run exercises it.
+A fail-fast Dask version check at celery worker startup (`crossmatch/core/dask.py`, `_VERSION_CHECK_PACKAGES`) compares a curated list of serialization-critical packages between the local client and the connected scheduler/workers — but it does not cover every dependency. Notably, it does not cover `lsdb`. This combination — scattered pin sites, a remote cluster whose state changes out-of-band, and a version check with deliberate scope limits — creates a specific failure mode: a developer who doesn't know all four pin sites exist, or who updates them in separate commits, will either leave the local stack in a transiently broken state, ship an image built from a lockfile that drifted from the declared pins, or leave drift undetected until a runtime smoke run exercises it.
 
 ## Guidance
 
-1. **Know the three pin sites and update them atomically.** The three locations that must move together in a single commit are:
-   - `crossmatch/requirements.base.txt` — the application-layer pip pin.
+1. **Know the four pin sites and update them atomically.** The four locations that must move together in a single commit are:
+   - `crossmatch/requirements.base.txt` — the application-layer pip pin (the human-edited source of truth).
+   - `crossmatch/requirements.lock` — the compiled lockfile, regenerated from the base file with `pip-compile --strip-extras --output-file=requirements.lock requirements.base.txt`. **The runtime image is built from this file** — `docker/Dockerfile` installs `requirements.lock`, not `requirements.base.txt` — and a lock that drifts from the base file fails a dedicated lock-drift CI check, so it must be regenerated in the same commit as any base-pin change.
    - `docker/docker-compose.yaml`, `dask-scheduler` service, `EXTRA_PIP_PACKAGES` string — the local scheduler container pin.
    - `docker/docker-compose.yaml`, `dask-worker` service, `EXTRA_PIP_PACKAGES` string — the local worker container pin.
 
@@ -37,7 +38,7 @@ A fail-fast Dask version check at celery worker startup (`crossmatch/core/dask.p
 3. **Follow the verification path in order, and treat the smoke run as load-bearing.**
    1. Confirm pip can resolve the new pin without conflict. Run inside Python 3.12 — a venv or a container. Host Python 3.10 fails pip resolution because `django>=6.0,<6.1` in `crossmatch/requirements.base.txt` requires Python 3.12+.
    2. Start the local docker-compose Dask stack (scheduler + worker) and confirm clean startup with no version-check failures.
-   3. Run the Django test suite as a low-cost sanity check, but do not treat a clean result as meaningful signal — see the auto-memory note in Examples below. (auto memory [claude])
+   3. Run the pytest suite (`python -m pytest`, in-container per `docs/developer.md`) as a low-cost sanity check, but do not treat a clean result as meaningful signal for *dependency alignment* — the unit tests exercise app logic, not the remote Dask serialization round-trip, so the smoke run (step 5) is what actually catches version drift.
    4. Start a celery worker against the remote EKS cluster and confirm the fail-fast check reports all compared packages aligned.
    5. Run a single-alert end-to-end smoke run against the hosted HATS catalogs. This is the only verification surface that exercises the full round-trip including any packages outside the fail-fast scope.
 
@@ -47,7 +48,9 @@ A fail-fast Dask version check at celery worker startup (`crossmatch/core/dask.p
 
 If pins are updated non-atomically, the fail-fast version check fails between commits and blocks any developer who pulls mid-upgrade — the local docker-compose stack will refuse to start until the remaining pin sites catch up.
 
-If pins are updated in the wrong subset of the three sites, the application layer and the container layer diverge, producing confusing behavior where the containers run a different version than the application expects.
+If pins are updated in the wrong subset of the four sites, the application layer and the container layer diverge, producing confusing behavior where the containers run a different version than the application expects.
+
+If `requirements.base.txt` moves but `crossmatch/requirements.lock` is not regenerated, two things go wrong: the lock-drift CI check fails the branch, and — because `docker/Dockerfile` installs from the lock — the built runtime image silently lags the declared pins until the lock is recompiled. Regenerate the lock in the same commit.
 
 For packages outside the fail-fast check scope (anything not in `_VERSION_CHECK_PACKAGES`), version drift between the local environment and the remote EKS cluster does not surface at startup — it appears as pickle deserialization errors, unexpected `AttributeError`s, or silent result corruption during actual crossmatch tasks. The smoke run is the only gate that catches this category of problem, which means skipping it leaves the service in an unknown state until production traffic exercises it.
 
@@ -62,7 +65,7 @@ For packages outside the fail-fast check scope (anything not in `_VERSION_CHECK_
 
 ### LSDB 0.8.1 → 0.9.0 upgrade (branch `refactor/lsdb-upgrade-0.9.0`, 2026-05-12)
 
-Three pin sites updated in one atomic commit:
+Three pin sites updated in one atomic commit (this upgrade predates `crossmatch/requirements.lock`; the same bump today would also regenerate the lock, making it four):
 
 - `crossmatch/requirements.base.txt` line 12: `lsdb==0.8.1` → `lsdb==0.9.0`
 - `docker/docker-compose.yaml` line 353 (`dask-scheduler` `EXTRA_PIP_PACKAGES`): `"lsdb==0.8.1 numpy==2.4.2 pandas==2.3.3 s3fs"` → `"lsdb==0.9.0 ..."`
@@ -76,7 +79,7 @@ Verification outcomes:
 
 1. Pip resolution in a Python 3.12 venv — clean, no conflicts.
 2. Local docker-compose stack — scheduler and worker came up cleanly with the updated `EXTRA_PIP_PACKAGES`.
-3. `manage.py test` — passed (zero failures). **Note: this result is not load-bearing.** (auto memory [claude]) The crossmatch-service repo has no functioning Python test runner; `manage.py test` finds zero tests because the `brokers` app is not in `INSTALLED_APPS`. The only `tests.py` file cannot be run directly via `python -m unittest crossmatch.brokers.pittgoogle.tests` either, because `crossmatch/brokers/__init__.py` does an unprefixed `from core.models import Alert, AlertDelivery` that requires both Django bootstrap and `crossmatch/` on `sys.path`. The meaningful verification surfaces are the docker-compose startup, the fail-fast Dask check, and the end-to-end smoke run.
+3. `manage.py test` — found zero tests (Django's default runner does not discover this project's suite). **Note: a unit-test result is not load-bearing for a dependency bump.** A real pytest/pytest-django suite now exists under `crossmatch/tests/` and runs in-container (per `docs/developer.md`), but even a green run cannot reveal cluster version drift — the unit tests exercise app logic, not the remote Dask serialization round-trip. The meaningful verification surfaces for an upgrade are the docker-compose startup, the fail-fast Dask check, and the end-to-end smoke run.
 4. Celery worker started against the remote EKS cluster — fail-fast check reported all compared packages aligned.
 5. Single-alert end-to-end smoke run — returned sensible crossmatch results against all three catalogs with no pickle exceptions.
 

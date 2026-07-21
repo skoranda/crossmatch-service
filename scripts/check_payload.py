@@ -1,8 +1,9 @@
 """Standalone checks for crossmatch.matching.payload.build_catalog_payload.
 
-The repo has no test runner; this is a scripted check in the style of
-``scripts/dump_catalog_columns.py``. Run from the repo root in an environment
-with numpy and pandas::
+The payload helper is covered by the pytest suite (``crossmatch/tests/test_payload.py``);
+this is a dependency-light standalone check in the style of
+``scripts/dump_catalog_columns.py`` for verifying the coercion without bringing up
+the app. Run from the repo root in an environment with numpy and pandas::
 
     python scripts/check_payload.py
 
