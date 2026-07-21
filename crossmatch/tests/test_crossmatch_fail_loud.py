@@ -1,6 +1,12 @@
-"""R12 / AE4: a catalog open/compute error surfaces (batch reverts to INGESTED)
-instead of being swallowed into a silent zero-match. "No spatial overlap" and an
-empty result stay normal skips (alert completes as MATCHED with no matches)."""
+"""Catalog-error behavior that stays fail-loud after the resilience change.
+
+Transient read failures are now skipped best-effort (see
+test_crossmatch_catalog_skip); this file pins the errors that must still NOT be
+swallowed. A DETERMINISTIC error -- a bad/missing column (ValueError from
+_get_catalog) or a dependency/version-skew mismatch -- is not transient, so it
+surfaces and reverts the batch instead of silently dropping the catalog. "No
+spatial overlap" and an empty result stay normal skips (alert completes MATCHED,
+no matches)."""
 
 from unittest.mock import MagicMock
 
@@ -34,11 +40,14 @@ def _mock_lsdb(monkeypatch):
 
 @pytest.mark.django_db
 @override_settings(CROSSMATCH_CATALOGS=TEST_CATALOGS)
-def test_catalog_open_error_fails_loud(monkeypatch):
-    # Covers AE4. A raising catalog seam must not silently zero-match.
+def test_deterministic_error_fails_loud(monkeypatch):
+    # A deterministic error (here a bad/missing-column ValueError, the exact
+    # shape _get_catalog raises up front) is NOT transient, so it must still fail
+    # loud: the batch reverts to INGESTED rather than completing MATCHED with a
+    # silently-dropped catalog. Resilience covers transient reads, not this.
     def _boom(*a, **k):
-        raise RuntimeError(
-            "HealpixDataset.__init__() got an unexpected keyword argument"
+        raise ValueError(
+            "test_cat: requested columns not found in catalog schema: ['mag']"
         )
 
     monkeypatch.setattr(crossmatch_mod, "crossmatch_alerts", _boom)

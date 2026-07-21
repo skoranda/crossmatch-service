@@ -577,7 +577,7 @@ with stream.open(url, "w") as producer:
     producer.write(payload)   # plain dict → auto-serialized as JSON
 ```
 
-**Message payload**: Each published message is a JSON dict with six generic top-level fields plus a catalog-specific `catalog_payload` object. The shape is assembled in `tasks/crossmatch.py` and published verbatim by `notifier/impl_hopskotch.py`. Example for a Gaia DR3 match:
+**Message payload**: Each published message is a JSON dict with eight generic top-level fields plus a catalog-specific `catalog_payload` object. The shape is assembled in `tasks/crossmatch.py` and published verbatim by `notifier/impl_hopskotch.py`. Example for a Gaia DR3 match:
 
 ```json
 {
@@ -595,13 +595,15 @@ with stream.open(url, "w") as producer:
         "pmra": -3.41,
         "classprob_dsc_combmod_star": 0.92,
         "ruwe": 1.08
-    }
+    },
+    "catalogs_skipped": [],
+    "partial": false
 }
 ```
 
-The six top-level fields (`diaObjectId` through `separation_arcsec`) are generic across all catalogs. The `catalog_payload` object is catalog-specific: its keys are the **lowercased upstream-native column names** declared in `settings.CROSSMATCH_CATALOGS[*].payload_columns` for that catalog (see §7.3 for the per-catalog configuration). For example, a DES Y6 Gold match's `catalog_payload` carries `wavg_mag_psf_g`, `bdf_t`, `dnf_z`, etc. (DES's UPPERCASE upstream names lowercased at publish time); a SkyMapper DR4 match's `catalog_payload` carries `u_psf`, `raj2000`, `class_star`, etc. (the J2000 suffix is preserved because the upstream name is already lowercase). Values are coerced to JSON-native scalars at the publish boundary; missing values appear as JSON `null`, and the key set is stable per catalog regardless of per-row nulls.
+The six identifying fields (`diaObjectId` through `separation_arcsec`) are generic across all catalogs. `catalogs_skipped` and `partial` are **batch-coverage** fields: `catalogs_skipped` is the sorted list of configured catalogs whose reads persistently failed in the batch that produced this match, and `partial` is `true` exactly when that list is non-empty (i.e. the crossmatch did not cover every configured catalog). They are **batch-level, not per-match** — every match published from the same batch carries the same values. A `partial: true` match means "this object was crossmatched against every catalog *except* those listed"; a consumer that needs full-coverage matches only should filter on `partial == false`. The `catalog_payload` object is catalog-specific: its keys are the **lowercased upstream-native column names** declared in `settings.CROSSMATCH_CATALOGS[*].payload_columns` for that catalog (see §7.3 for the per-catalog configuration). For example, a DES Y6 Gold match's `catalog_payload` carries `wavg_mag_psf_g`, `bdf_t`, `dnf_z`, etc. (DES's UPPERCASE upstream names lowercased at publish time); a SkyMapper DR4 match's `catalog_payload` carries `u_psf`, `raj2000`, `class_star`, etc. (the J2000 suffix is preserved because the upstream name is already lowercase). Values are coerced to JSON-native scalars at the publish boundary; missing values appear as JSON `null`, and the key set is stable per catalog regardless of per-row nulls.
 
-**Consumer evolution policy**: Consumers must treat unknown `catalog_payload` keys as additive. New catalogs may add keys, and existing catalogs may grow their `payload_columns` without a schema-version bump; the published-payload contract is discriminated by `catalog_name`, not by a version field. The six generic top-level fields are stable.
+**Consumer evolution policy**: Consumers must treat unknown top-level and `catalog_payload` keys as additive. New catalogs may add `catalog_payload` keys, and existing catalogs may grow their `payload_columns`, without a schema-version bump; the published-payload contract is discriminated by `catalog_name`, not by a version field. The generic top-level fields grow additively too — `catalogs_skipped` and `partial` were added this way — so a consumer must not assume a fixed top-level field set. The six identifying fields (`diaObjectId` through `separation_arcsec`) are stable. Note: the batch-coverage fields (`catalogs_skipped`/`partial`) reflect real per-batch coverage only on the live Hopskotch stream; the read-model API (§6.x, `detail=full`) reconstructs a *stored* match with no batch context, so it always reports `catalogs_skipped: []` / `partial: false` regardless of the originating batch's actual coverage.
 
 For full depth on the per-catalog declarative publish contract, see [`docs/solutions/conventions/catalog-specific-payload-columns.md`](docs/solutions/conventions/catalog-specific-payload-columns.md). For depth on the numpy/pandas → JSON-native value coercion at the publish boundary (including `pd.isna` sentinel coverage and the bool-before-int rule), see [`docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md`](docs/solutions/design-patterns/coerce-numpy-pandas-scalars-to-json.md).
 

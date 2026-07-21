@@ -4,10 +4,10 @@ from celery import shared_task
 from django.conf import settings
 from django.db import transaction
 from core.models import Alert, CatalogMatch, Notification
-from matching.catalog import crossmatch_alerts
+from matching.catalog import crossmatch_alerts, is_transient_read_error
 from matching.payload import build_catalog_payload, build_published_payload
 from core.log import get_logger
-from core.metrics import CROSSMATCH_BATCHES, CROSSMATCH_MATCHES
+from core.metrics import CATALOG_SKIPS, CROSSMATCH_BATCHES, CROSSMATCH_MATCHES
 logger = get_logger(__name__)
 
 
@@ -62,6 +62,14 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
         # before its alert is MATCHED. Otherwise dispatch can send a notification
         # and run its MATCHED-gated transition while the alert is still QUEUED;
         # the transition no-ops and single-match alerts get stuck at MATCHED.
+        # Track per-catalog outcome across the loop. A catalog "succeeds" when its
+        # read completes -- matches, empty, or no-overlap all count; only a read
+        # error (retries exhausted) is a skip. Best-effort resilience (R1/R2): one
+        # persistently-failing catalog is skipped, not fatal. The >=1-success guard
+        # (R3) below still fails the whole batch closed when EVERY catalog errored,
+        # so a broad outage reverts instead of publishing empty crossmatches.
+        succeeded_catalogs = set()
+        skipped_catalogs = set()
         all_notifications = []
         for catalog_config in settings.CROSSMATCH_CATALOGS:
             catalog_name = catalog_config['name']
@@ -72,22 +80,40 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
 
             try:
                 result_df = crossmatch_alerts(alerts_catalog, catalog_config)
-            except RuntimeError as exc:
-                if "Catalogs do not overlap" in str(exc):
+            except Exception as exc:
+                # No spatial overlap is normal, not an error: the batch footprint
+                # misses this catalog's footprint (e.g. DES's southern-only sky).
+                # Counts as a success -- the catalog was read, it just has nothing
+                # here -- so it must not trip the >=1-success guard below.
+                if (isinstance(exc, RuntimeError)
+                        and "Catalogs do not overlap" in str(exc)):
                     logger.info('No spatial overlap with catalog',
                                 catalog=catalog_name, total=len(clean_df))
+                    succeeded_catalogs.add(catalog_name)
                     continue
-                raise
-            except Exception:
-                # Fail loud: a catalog open/compute error (e.g. a dependency or
-                # version skew) must surface, not be swallowed into a silent
-                # zero-match. Re-raise so the batch reverts to INGESTED and
-                # retries rather than completing as MATCHED with nothing matched.
-                # "No spatial overlap" and empty results stay normal skips above.
-                logger.exception('Crossmatch failed for catalog',
-                                 catalog=catalog_name)
-                raise
+                # Decide skip-vs-fail-loud by the transient classification, not by
+                # exception type. A DETERMINISTIC error -- a bad/missing/colliding
+                # column raised by _get_catalog (ValueError), or a dependency/
+                # version-skew mismatch -- must still fail loud so the batch reverts
+                # and the misconfiguration is surfaced, rather than silently dropping
+                # that catalog from every future batch.
+                if not is_transient_read_error(exc):
+                    logger.exception('Crossmatch failed for catalog',
+                                     catalog=catalog_name)
+                    raise
+                # A transient read failure whose retries in matching/catalog.py are
+                # exhausted (a source host that stays down under load). Skip this
+                # catalog and continue rather than aborting the whole batch and
+                # rolling back the catalogs that DID succeed (R1). The alert is
+                # finalized best-effort with the rest; the skip is marked in the
+                # published payload (R4) and counted for operators (R5).
+                logger.warning('Catalog skipped after transient read failure',
+                               catalog=catalog_name, error=str(exc))
+                skipped_catalogs.add(catalog_name)
+                CATALOG_SKIPS.labels(catalog=catalog_name).inc()
+                continue
 
+            succeeded_catalogs.add(catalog_name)
             if result_df.empty:
                 logger.info('No matches found',
                             catalog=catalog_name, total=len(clean_df))
@@ -154,6 +180,30 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
                         catalog=catalog_name,
                         matched=len(matches_to_create), total=len(clean_df))
 
+        sorted_skipped = sorted(skipped_catalogs)
+
+        # >=1-success guard (R3): if EVERY catalog's read errored (a broad outage,
+        # not real "no matches"), fail the batch closed so the outer handler
+        # reverts it to INGESTED and it retries -- rather than finalizing alerts
+        # with zero matches. A skipped catalog does not count as a success (KTD5).
+        if not succeeded_catalogs:
+            raise RuntimeError(
+                f'All {len(settings.CROSSMATCH_CATALOGS)} catalogs failed to read '
+                f'for this batch; reverting rather than publishing empty '
+                f'crossmatches (skipped={sorted_skipped})'
+            )
+
+        # Mark coverage (R4): stamp each published notification with the catalogs
+        # skipped in this batch so a consumer can tell what the crossmatch covered.
+        # The full skipped set is only known now -- a later catalog can fail after
+        # an earlier one's notifications were built -- so stamp after the loop.
+        # (No-skip batches keep the build-time default: catalogs_skipped=[],
+        # partial=False.)
+        if skipped_catalogs:
+            for notification in all_notifications:
+                notification.payload['catalogs_skipped'] = sorted_skipped
+                notification.payload['partial'] = True
+
         # 4. Create notifications and transition ALL alerts to MATCHED atomically,
         # so notifications become dispatchable exactly when (not before) their
         # alerts are MATCHED. See the note at step 2.
@@ -167,7 +217,9 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
         CROSSMATCH_BATCHES.labels(result='completed').inc()
         logger.info('Crossmatch batch complete',
                     batch_size=len(batch_ids),
-                    notifications=len(all_notifications))
+                    notifications=len(all_notifications),
+                    catalogs_succeeded=len(succeeded_catalogs),
+                    catalogs_skipped=sorted_skipped)
 
     except Exception:
         CROSSMATCH_BATCHES.labels(result='failed').inc()

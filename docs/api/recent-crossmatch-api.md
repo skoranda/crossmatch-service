@@ -117,9 +117,9 @@ the catalog source:
 
 ### `detail=full`
 
-Each match becomes the full published payload — exactly what the service
-publishes over Hopskotch for that match, including the nested `catalog_payload`
-of catalog-specific columns. Note that `ra`/`dec` inside a match are the matched
+Each match is built from the same payload builder the Hopskotch publish path
+uses, so it carries the same fields — including the nested `catalog_payload` of
+catalog-specific columns. Note that `ra`/`dec` inside a match are the matched
 **catalog source** coordinates (`source_ra_deg`/`source_dec_deg`), which differ
 from the object's `ra`/`dec` at the object level:
 
@@ -136,7 +136,9 @@ from the object's `ra`/`dec` at the object level:
       "catalog_name": "gaia_dr3",
       "catalog_source_id": "42",
       "separation_arcsec": 0.5,
-      "catalog_payload": {"phot_g_mean_mag": 18.3, "ruwe": 1.02, "...": "..."}
+      "catalog_payload": {"phot_g_mean_mag": 18.3, "ruwe": 1.02, "...": "..."},
+      "catalogs_skipped": [],
+      "partial": false
     }
   ]
 }
@@ -144,6 +146,14 @@ from the object's `ra`/`dec` at the object level:
 
 Only the current match version per `(object, catalog, source)` is returned, so a
 re-matched object surfaces each match once, not once per version.
+
+**Batch-coverage fields differ from the live stream.** The `catalogs_skipped` /
+`partial` batch-coverage fields (see the design doc's published-payload section)
+are always `[]` / `false` here. This endpoint serves a *stored* match and has no
+record of which catalogs were skipped in the batch that originally produced it,
+so it cannot reconstruct that per-batch value — only the live Hopskotch stream
+carries the real coverage. A consumer that needs to know whether a given match's
+batch was partial must capture it from the stream at publish time.
 
 ## Paging
 
