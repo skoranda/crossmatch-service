@@ -1,6 +1,7 @@
 import lsdb
 import pandas as pd
 from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import transaction
 from core.models import Alert, CatalogMatch, Notification
@@ -11,7 +12,16 @@ from core.metrics import CATALOG_SKIPS, CROSSMATCH_BATCHES, CROSSMATCH_MATCHES
 logger = get_logger(__name__)
 
 
-@shared_task(name="crossmatch_batch")
+# soft_time_limit reverts an overrunning batch via the on-raise path (self-heal,
+# R3/R4); time_limit is the SIGKILL backstop for a Dask call that never returns to
+# Python for the soft signal. Both are env-configurable settings that MUST stay
+# below CROSSMATCH_BATCH_STUCK_SECONDS (the ordering constraint documented there)
+# so a live batch self-reverts before the recovery timer could reclaim it.
+@shared_task(
+    name="crossmatch_batch",
+    soft_time_limit=settings.CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=settings.CROSSMATCH_BATCH_TIME_LIMIT_SECONDS,
+)
 def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
     """Process a batch of alerts through LSDB crossmatch against all catalogs.
 
@@ -80,6 +90,14 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
 
             try:
                 result_df = crossmatch_alerts(alerts_catalog, catalog_config)
+            except SoftTimeLimitExceeded:
+                # The batch soft time limit must self-heal by reverting (R4), never
+                # be misread as a catalog skip. It can fire while a transient read
+                # error is being handled inside _read_with_retry, which implicitly
+                # chains it (SoftTimeLimitExceeded.__context__ = the transient exc);
+                # the message-based transient classifier below would then walk the
+                # chain and skip the catalog. Match by type here, ahead of that.
+                raise
             except Exception as exc:
                 # No spatial overlap is normal, not an error: the batch footprint
                 # misses this catalog's footprint (e.g. DES's southern-only sky).
@@ -164,6 +182,11 @@ def crossmatch_batch(batch_ids: list, match_version: int = 1) -> None:
                             dia_id, ra, dec, catalog_name, src_id, dist, catalog_payload
                         ),
                     )
+                except SoftTimeLimitExceeded:
+                    # The batch soft time limit can fire mid-row-build; it must not
+                    # be swallowed as an unbuildable row -- re-raise so the outer
+                    # handler reverts the batch to INGESTED for re-dispatch (R4).
+                    raise
                 except Exception:
                     logger.exception('Skipping unbuildable match row',
                                      catalog=catalog_name)

@@ -135,16 +135,56 @@ CROSSMATCH_BATCH_MAX_WAIT_SECONDS = int(
 CROSSMATCH_BATCH_MAX_SIZE = int(
     os.getenv('CROSSMATCH_BATCH_MAX_SIZE', '100000')
 )
+# crossmatch_batch runtime bounds. The SOFT limit self-heals an overrunning live
+# batch: it raises SoftTimeLimitExceeded, which the task's on-raise path reverts to
+# INGESTED for re-dispatch. The hard TIME limit is the SIGKILL backstop for a Dask
+# call that never returns to Python for the soft signal. Sized from the measured
+# 100k-batch worst case (~4.3 min). See the ordering constraint on
+# CROSSMATCH_BATCH_STUCK_SECONDS below and
+# docs/plans/2026-07-20-001-fix-crossmatch-batch-kill-recovery-plan.md.
+CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS = int(
+    os.getenv('CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS', '480')
+)
+CROSSMATCH_BATCH_TIME_LIMIT_SECONDS = int(
+    os.getenv('CROSSMATCH_BATCH_TIME_LIMIT_SECONDS', '600')
+)
 # A QUEUED batch whose worker was hard-killed (pod restart, OOM, SIGKILL) never
 # runs the crossmatch task's own revert-on-exception path, so the dispatcher
 # recovers it: QUEUED alerts whose queued_at is older than this are reverted to
 # INGESTED and re-dispatched. Measured against queued_at (when the batch was
 # dispatched), NOT ingest_time, so it never reverts a live batch of
-# long-ingested alerts. Keep it comfortably above the real max batch runtime
-# (a full batch runs single-digit minutes) and below any need for fast recovery.
+# long-ingested alerts.
+#
+# Ordering constraint (so the timer never reclaims a LIVE batch):
+#   CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS
+#     < CROSSMATCH_BATCH_TIME_LIMIT_SECONDS
+#     < CROSSMATCH_BATCH_STUCK_SECONDS,
+# and this must also exceed the soft limit PLUS worst-case broker/pickup latency
+# PLUS a clock-skew allowance. A live batch that overruns its soft limit
+# self-reverts before this timer can fire; this timer only catches the hard-kill
+# case. Defaults: soft 480s < hard 600s < this 780s (~5 min margin over soft)
+# -> recovery ~13 min. (Tune all three together; test_time_limits_below_stuck_
+# threshold pins the shipped defaults.)
 CROSSMATCH_BATCH_STUCK_SECONDS = int(
-    os.getenv('CROSSMATCH_BATCH_STUCK_SECONDS', '3600')
+    os.getenv('CROSSMATCH_BATCH_STUCK_SECONDS', '780')
 )
+# Fail fast on a misconfigured deploy rather than silently letting the recovery
+# timer reclaim a live batch (which would re-dispatch a concurrent run). All three
+# bounds are independently env-configurable, so enforce the ordering at startup.
+if not (
+    CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS
+    < CROSSMATCH_BATCH_TIME_LIMIT_SECONDS
+    < CROSSMATCH_BATCH_STUCK_SECONDS
+):
+    raise ImproperlyConfigured(
+        'Crossmatch batch time bounds must satisfy '
+        'CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS < '
+        'CROSSMATCH_BATCH_TIME_LIMIT_SECONDS < CROSSMATCH_BATCH_STUCK_SECONDS so the '
+        'stuck-batch recovery timer never reclaims a live batch (got '
+        f'{CROSSMATCH_BATCH_SOFT_TIME_LIMIT_SECONDS} / '
+        f'{CROSSMATCH_BATCH_TIME_LIMIT_SECONDS} / '
+        f'{CROSSMATCH_BATCH_STUCK_SECONDS}).'
+    )
 
 # Resilience for transient remote HATS catalog reads (data.lsdb.io drops
 # connections mid parquet read -> aiohttp ServerDisconnectedError). Total read
