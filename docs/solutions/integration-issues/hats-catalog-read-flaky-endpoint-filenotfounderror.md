@@ -58,7 +58,7 @@ throughput.
 
 ## Solution
 Add `FileNotFoundError` to `_TRANSIENT_READ_SIGNATURES` in
-`matching/catalog.py`, so the class-name match in `_is_transient_read_error`
+`matching/catalog.py`, so the class-name match in `is_transient_read_error`
 treats it as retryable alongside the aiohttp disconnect family:
 
 ```python
@@ -103,6 +103,12 @@ error modes that *should* fail loud do not use this class:
 ## Related Issues
 - Companion to [[hats-catalog-read-transient-disconnect-fsspec-typeerror]] — same
   root theme (transient data.lsdb.io reads), different surfaced error class.
+- [Celery soft time limit silently swallowed by the transient-read exception classifier](soft-time-limit-swallowed-by-exception-classifier.md)
+  — broadening `_TRANSIENT_READ_SIGNATURES`, as this doc does, widens what the
+  chain-walk classifier matches. A later change added a Celery soft time limit
+  whose `SoftTimeLimitExceeded`, once `__context__`-chained onto an in-flight
+  transient, got mis-classified as retryable by that same walk. The fix is a
+  type-guard that re-raises `SoftTimeLimitExceeded` ahead of the classifier.
 - Fixed on branch `fix/catalog-read-filenotfound-transient`.
 - Surfaced while recovering the crossmatch stall whose other cause was the 72h
   stuck-batch threshold (`Alert.queued_at` fix, branch
