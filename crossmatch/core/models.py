@@ -37,8 +37,11 @@ class Alert(models.Model):
     ingest_time = models.DateTimeField(null=False, auto_now_add=True)
     # INTEGER NOT NULL    alert schema version
     schema_version = models.IntegerField(null=False, default=1)
-    # JSONB NOT NULL    raw payload
-    payload = models.JSONField(null=False)
+    # JSONB NULL    raw payload; nulled by the retention sweep after the grace period
+    # once the alert is terminal (its result lives in catalog_matches /
+    # core_notification). NULL means the payload has been reclaimed. See
+    # tasks/retention.py.
+    payload = models.JSONField(null=True)
     # TEXT NOT NULL DEFAULT 'ingested'    ingested, queued, matched, notified
     status = models.TextField(
         choices=Status.choices,
@@ -50,6 +53,11 @@ class Alert(models.Model):
     # was killed. Distinct from ingest_time, which is when the alert first
     # arrived and may be far older than when its batch was actually dispatched.
     queued_at = models.DateTimeField(null=True, blank=True)
+    # TIMESTAMPTZ NULL    set when the alert reaches a terminal state — NOTIFIED for
+    # matched alerts, crossmatch-completion for no-match alerts (which never reach
+    # NOTIFIED). Anchors the payload-retention grace period; NULL means the alert is
+    # still in flight and its payload is retained regardless of age.
+    notified_at = models.DateTimeField(null=True, blank=True)
     # DOUBLE PRECISION NULL    LSST real/bogus score, captured first-seen (read model)
     reliability = models.FloatField(null=True)
     # BIGINT NULL    HEALPix NESTED pixel (order 16) from ra_deg/dec_deg (read model)
@@ -62,6 +70,14 @@ class Alert(models.Model):
             models.Index(fields=['event_time'], name='core_alert_event_time_idx'),
             models.Index(fields=['healpix_ipix'], name='core_alert_healpix_ipix_idx'),
             models.Index(fields=['ingest_time'], name='core_alert_ingest_time_idx'),
+            # Partial index for the retention sweep: only rows still carrying a
+            # payload are candidates to null. Keeps the index small as payloads
+            # are reclaimed.
+            models.Index(
+                fields=['notified_at'],
+                name='core_alert_notified_at_idx',
+                condition=models.Q(payload__isnull=False),
+            ),
         ]
 
 
@@ -182,7 +198,9 @@ class Notification(models.Model):
         db_column='catalog_match_id',
     )
     destination = models.TextField(null=False)
-    payload = models.JSONField(null=False)
+    # JSONB NULL    published payload; nulled by the retention sweep after the grace
+    # once the notification is SENT (anchor: sent_at). PENDING/FAILED keep it.
+    payload = models.JSONField(null=True)
     state = models.TextField(
         choices=State.choices,
         default=State.PENDING,
@@ -198,4 +216,11 @@ class Notification(models.Model):
         indexes = [
             models.Index(fields=['state'], name='core_notif_state_idx'),
             models.Index(fields=['alert'], name='core_notif_alert_idx'),
+            # Mirror of the alert-side retention index: the sweep filters on
+            # sent_at among rows still carrying a payload.
+            models.Index(
+                fields=['sent_at'],
+                name='core_notif_sent_at_idx',
+                condition=models.Q(payload__isnull=False),
+            ),
         ]

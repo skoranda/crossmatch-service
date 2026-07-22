@@ -100,6 +100,7 @@ def dispatch_notifications() -> None:
     Beat ticks from picking up the same rows.
     """
     from django.db import transaction
+    from django.utils import timezone
     from core.models import Alert, Notification
     from notifier.dispatch import DESTINATION_HANDLERS
 
@@ -141,10 +142,33 @@ def dispatch_notifications() -> None:
             # transitioned to NOTIFIED. Filter by the natural key instead.
             Alert.objects.filter(
                 lsst_diaObject_diaObjectId=alert_id, status=Alert.Status.MATCHED
-            ).update(status=Alert.Status.NOTIFIED)
+            ).update(status=Alert.Status.NOTIFIED, notified_at=timezone.now())
+
+
+class RetentionSweep:
+    task_name = 'Retention Sweep'
+    task_handle = 'retention_sweep'
+    task_frequency_seconds = settings.CROSSMATCH_RETENTION_INTERVAL_SECONDS
+    task_initially_enabled = True
+
+
+@shared_task
+def retention_sweep() -> None:
+    """Null raw payloads for terminal alerts/notifications past the grace period.
+
+    Runs every CROSSMATCH_RETENTION_INTERVAL_SECONDS. Bounded per run by
+    CROSSMATCH_RETENTION_MAX_ROWS so it never starves ingest/crossmatch/notify.
+    """
+    from tasks.retention import sweep_payloads
+
+    sweep_payloads(
+        grace_days=settings.CROSSMATCH_RETENTION_GRACE_DAYS,
+        max_rows=settings.CROSSMATCH_RETENTION_MAX_ROWS,
+    )
 
 
 periodic_tasks = [
     DispatchCrossmatchBatch(),
     DispatchNotifications(),
+    RetentionSweep(),
 ]

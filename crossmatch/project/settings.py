@@ -168,6 +168,25 @@ CROSSMATCH_BATCH_TIME_LIMIT_SECONDS = int(
 CROSSMATCH_BATCH_STUCK_SECONDS = int(
     os.getenv('CROSSMATCH_BATCH_STUCK_SECONDS', '780')
 )
+
+######################################################################
+# Payload retention (null-in-place)
+#
+# The retention sweep nulls raw payloads for terminal alerts/notifications older
+# than the grace period, keeping the rows (the result lives in catalog_matches /
+# core_notification). PROD uses the 30-day default; DEV overrides to a short window
+# via env (its ~56 KB payloads fill any 30-day window long before 30 days). The
+# per-run row cap keeps the sweep from starving ingest/crossmatch/notify.
+CROSSMATCH_RETENTION_GRACE_DAYS = int(
+    os.getenv('CROSSMATCH_RETENTION_GRACE_DAYS', '30')
+)
+CROSSMATCH_RETENTION_MAX_ROWS = int(
+    os.getenv('CROSSMATCH_RETENTION_MAX_ROWS', '10000')
+)
+CROSSMATCH_RETENTION_INTERVAL_SECONDS = int(
+    os.getenv('CROSSMATCH_RETENTION_INTERVAL_SECONDS', '3600')
+)
+
 # Fail fast on a misconfigured deploy rather than silently letting the recovery
 # timer reclaim a live batch (which would re-dispatch a concurrent run). All three
 # bounds are independently env-configurable, so enforce the ordering at startup.
